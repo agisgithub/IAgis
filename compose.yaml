@@ -2,6 +2,7 @@ services:
   iagis:
     build: .
     restart: unless-stopped
+
     env_file:
       - ${IAGIS_ENV_FILE:-/etc/iagis/iagis.env}
     command: ["worker", "--entity-id", "${IAGIS_ENTITY_ID:?required}"]
