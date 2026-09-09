@@ -1,0 +1,20 @@
+services:
+  iagis:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - ${IAGIS_ENV_FILE:-/etc/iagis/iagis.env}
+    command: ["worker", "--entity-id", "${IAGIS_ENTITY_ID:?required}"]
+    volumes:
+      - iagis_data:/data
+      - iagis_reports:/reports
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  iagis_data:
+  iagis_reports:
