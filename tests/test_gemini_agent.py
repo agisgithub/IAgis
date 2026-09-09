@@ -1,5 +1,6 @@
 import json
 import pytest
+pytest.importorskip("google.genai")
 from iagis.gemini_agent import GeminiGovernanceAgent
 
 class Response:

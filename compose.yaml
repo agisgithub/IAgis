@@ -2,9 +2,11 @@ services:
   iagis:
     build: .
     restart: unless-stopped
-
     env_file:
       - ${IAGIS_ENV_FILE:-/etc/iagis/iagis.env}
+    # Linux: compartilha somente a pilha de rede do host. Assim 127.0.0.1:11434
+    # alcança o Ollama ligado ao loopback sem expô-lo em 0.0.0.0.
+    network_mode: host
     command: ["worker", "--entity-id", "${IAGIS_ENTITY_ID:?required}"]
     volumes:
       - iagis_data:/data

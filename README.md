@@ -1,35 +1,30 @@
 # IAgis Agent
 
-Agente Python para **homologação exclusivamente documental e de governança de softwares** em
-chamados do GLPI 11. Ele reage a `@IAgis`, pesquisa evidências com a ferramenta web oficial da
-Gemini (padrão) ou OpenAI, produz saída Pydantic e submete o parecer a regras determinísticas. Nesta fase, o sistema
-**não baixa, instala nem executa instaladores** e jamais encerra chamados.
+Agente Python para um piloto de atendimento assistido no GLPI 11. No modo padrão `suggestion`, ele
+reage a `@iagis` e usa o Ollama local para gerar uma **sugestão em português para revisão humana**.
+Não pesquisa a web, publica, aprova, homologa, encerra nem altera chamados. Os adaptadores anteriores
+de Gemini/OpenAI e o modo de governança permanecem preservados, mas fora deste piloto.
 
 ## Arquitetura
 
 ```text
-GLPI API V1 (leitura) ─> monitor/detector ─> SQLite (idempotência)
-                                 │
-                                 v
-               IAgis Governança + WebSearchTool
-                                 │ relatório Pydantic (sem acesso GLPI)
-                                 v
-                       motor determinístico
-                                 │
-                      prévia/aprovação humana
-                                 v
-               publicador Python ─> acompanhamento GLPI
+GLPI API V1 (somente leitura) ─> eventos ordenados/SQLite ─> Ollama no loopback do host
+                                           │                         │
+                                           └──── sugestão JSON ──────┘
+                                                        │
+                                             CLI de revisão humana
 ```
 
 - `glpi_client.py`: sessão por App/User Token, TLS, timeout, retries, HTTP 206 e paginação.
 - `worker.py` e `mention_detector.py`: monitor, entidades autorizadas, prevenção de loop e retomada
   pelo histórico completo.
-- `governance_agent.py`: OpenAI Agents SDK, Web Search e fronteira contra prompt injection.
+- `ollama_agent.py`: sugestão estruturada, timeout e uma única correção de JSON, sem pesquisa web.
+- `ai_provider.py`: interface que preserva os adaptadores Gemini e OpenAI.
 - `governance_models.py` / `governance_rules.py`: contrato Pydantic e barreira determinística.
-- `repository.py`: estado, auditoria, hash único e idempotência em SQLite.
-- `report_formatter.py` / `cli.py`: prévia e única via permitida de publicação.
+- `repository.py`: migração, auditoria, claim atômico, retries e identidade de evento em SQLite.
+- `report_formatter.py` / `cli.py`: lista e prévia local; publicação bloqueada no piloto.
 
-O agente de IA não recebe cliente, token nem função de escrita no GLPI. Somente a aplicação chama
+O agente de IA não recebe cliente, token nem função de escrita no GLPI. O modo do piloto não chama
 `create_followup`; não existem operações de exclusão ou encerramento no cliente.
 
 ## Configuração
@@ -42,8 +37,13 @@ ambiente do serviço. **Não crie `.env` com credenciais**.
 | `GLPI_URL` | sim | URL HTTPS do GLPI, sem `/apirest.php` |
 | `GLPI_APP_TOKEN` | sim | App-Token da integração |
 | `GLPI_USER_TOKEN` | sim | User-Token técnico, com privilégio mínimo |
-| `AI_PROVIDER` | não | `gemini` (padrão), `openai`; nomes `anthropic` e `ollama` reservados para adaptadores futuros |
-| `AI_MODEL` | não | Modelo do provedor; padrão `gemini-2.5-flash` |
+| `AI_PROVIDER` | não | `ollama` (padrão), `gemini` ou `openai` |
+| `AI_MODEL` | não | Padrão `qwen3:4b-instruct-2507-q4_K_M` |
+| `IAGIS_MODE` | não | `suggestion` no piloto; `governance` preserva o fluxo anterior |
+| `OLLAMA_URL` | não | Padrão `http://127.0.0.1:11434` |
+| `OLLAMA_TIMEOUT` | não | Timeout do modelo em segundos; padrão 120 |
+| `IAGIS_MAX_ATTEMPTS` | não | Máximo de tentativas por evento; padrão 3 |
+| `IAGIS_RETRY_DELAY` | não | Espera entre tentativas automáticas; padrão 300 segundos |
 | `GEMINI_API_KEY` | com Gemini | Chave do Gemini AI Studio |
 | `OPENAI_API_KEY` | com OpenAI | Chave da API OpenAI |
 | `IAGIS_MENTION` | não | Menção; padrão `@IAgis` |
@@ -74,7 +74,7 @@ sempre executa `killSession`; `entities` é somente leitura. O contexto raiz exp
 
 ## Instalação assistida no Debian 13
 
-O instalador pergunta os segredos com entrada oculta, grava-os em `/etc/iagis/iagis.env` com modo
+O instalador pergunta os segredos GLPI com entrada oculta, grava-os em `/etc/iagis/iagis.env` com modo
 `0600`, constrói o container, testa somente a conexão, lista entidades, pede a entidade e inicia o
 worker em dry-run. Baixe e revise antes de executar:
 
@@ -86,7 +86,8 @@ bash /tmp/install-iagis.sh
 ```
 
 O script nunca cria `.env` dentro do repositório. Ele exige usuário com `sudo`, Debian 13+, Docker
-e Compose v2, detecta a arquitetura automaticamente e mantém publicação automática desabilitada.
+e Compose v2, detecta a arquitetura automaticamente, confirma que o modelo já existe e nunca baixa
+outro modelo. A publicação permanece desabilitada.
 
 ## CLI
 
@@ -96,33 +97,36 @@ python -m iagis.cli entities [--entity-id 0]
 python -m iagis.cli ticket --ticket-id ID --entity-id ID
 python -m iagis.cli analyze --ticket-id ID --entity-id ID
 python -m iagis.cli preview --analysis-id ID
+python -m iagis.cli analyses --limit 20
+python -m iagis.cli retry --analysis-id ID
 python -m iagis.cli publish --analysis-id ID [--confirm]
 python -m iagis.cli worker --entity-id ID
 ```
 
-`publish` sem `--confirm` imprime somente a prévia. Com dry-run ativo, até `--confirm` é bloqueado.
-Resultados `INCONCLUSIVO`, `ALTO` ou `CRITICO` nunca são publicados automaticamente: exigem a
-invocação humana explícita com `--confirm`. Demais resultados precisam também estar na allowlist.
+No modo `suggestion`, `publish` é sempre bloqueado, inclusive com `--confirm` e independentemente de
+configuração. `preview` mostra a sugestão salva; `analyses` lista estado/tentativas/erro sem conteúdo
+do chamado; `retry` libera uma falha dentro do limite e tenta o mesmo evento novamente.
 
 ## Fluxo de análise e aprovação
 
-1. O monitor lê somente uma entidade autorizada e detecta menção na descrição ou follow-up.
-2. Menções do usuário técnico, hashes já vistos e conteúdo duplicado são ignorados.
-3. O histórico e **somente metadados** dos anexos entram como dados não confiáveis; arquivos não são
-   baixados. Uma resposta posterior com nova menção/hash cria análise usando o histórico atualizado.
-4. A IA pesquisa fontes prioritariamente oficiais e retorna o contrato obrigatório. Ausências viram
-   `não confirmado`, perguntas objetivas em `pendencias` e, quando essenciais, `INCONCLUSIVO`.
-5. Regras podem impor `NAO_HOMOLOGADO`, `INCONCLUSIVO` ou `HOMOLOGADO_COM_RESTRICOES`; cada regra
-   fica em `regras_aplicadas`.
-6. A análise e o parecer ficam no SQLite. Em dry-run a prévia é a única saída.
-7. Uma pessoa revisa `preview` e solicita publicação explicitamente. A aplicação publica um único
-   acompanhamento e registra ID/data, impedindo repetição.
+1. O monitor lista **todos os chamados visíveis retornados pela API na entidade**, sem filtro de
+   status ou data neste piloto, e procura a menção na descrição e nos acompanhamentos.
+2. A descrição vem primeiro; acompanhamentos são ordenados explicitamente por data e ID.
+3. A identidade contém entidade, chamado, origem/ID e hash da versão. Texto igual em eventos
+   diferentes é processado; o mesmo evento não. Editar descrição ou acompanhamento cria nova versão.
+4. Comentários do próprio IAgis são ignorados. Histórico e somente metadados dos anexos entram como
+   dados não confiáveis; arquivos não são baixados ou executados.
+5. Ollama devolve JSON validado. Se a estrutura for inválida, há no máximo uma solicitação de
+   correção; validade estrutural não é tratada como evidência factual.
+6. A sugestão fica no SQLite para `preview`. Nada é publicado no GLPI.
+7. Falhas transitórias aguardam `IAGIS_RETRY_DELAY` e respeitam `IAGIS_MAX_ATTEMPTS`; configuração
+   inválida não entra em retry automático. `retry` permite tentativa administrativa dentro do limite.
 
 ## Segurança
 
 - TLS obrigatório, validação de certificado ativa, timeouts e retentativas limitadas.
 - Privilégio mínimo: conta restrita às entidades necessárias; nenhuma API destrutiva é implementada.
-- Chamados, comentários, metadados e resultados web são não confiáveis. A instrução privilegiada
+- Chamados, comentários e metadados são não confiáveis. A instrução privilegiada
   proíbe obedecer pedidos neles, revelar tokens, executar comandos, mudar regras/escopo ou autorizar
   publicação. A aprovação jamais é ferramenta da IA.
 - Logs JSON guardam IDs/estados/tipos de erro, não corpos integrais, documentos, credenciais,
@@ -130,8 +134,8 @@ invocação humana explícita com `--confirm`. Demais resultados precisam també
   provedores externos.
 - SQLite deve ficar em volume protegido, com backup, retenção e permissões do usuário do serviço.
 - O container é não-root, read-only, sem capabilities, com `no-new-privileges` e volumes separados.
-- Respostas ainda devem ser revisadas: busca e modelos podem errar, omitir ou encontrar fontes
-  desatualizadas. O parecer não é validação binária, técnica, EDR ou autorização de implantação.
+- Respostas devem ser revisadas: o Qwen é candidato ao piloto e pode errar ou omitir fatos. A
+  sugestão não é pesquisa, homologação, aprovação nem autorização de implantação.
 
 ### Revogação de tokens
 
@@ -149,7 +153,10 @@ docker compose build
 docker compose up -d
 ```
 
-O serviço reinicia `unless-stopped`, persiste `/data` e `/reports` e possui healthcheck de conexão.
+O serviço reinicia `unless-stopped`, persiste `/data` e `/reports` e possui healthcheck apenas do
+runtime. Sucesso de GLPI e IA aparece separadamente nos logs. No Linux, `network_mode: host` permite
+ao container alcançar `127.0.0.1:11434`; o Ollama continua ligado somente ao loopback e não precisa
+ser exposto em `0.0.0.0`. `host.docker.internal` sozinho não resolveria um listener em loopback.
 Nenhuma credencial entra no build; o Compose exige injeção externa. Em produção prefira secrets do
 orquestrador em vez do ambiente quando disponível.
 
@@ -161,3 +168,53 @@ orquestrador em vez do ambiente quando disponível.
 - O polling lista chamados visíveis da entidade. Em bases grandes, recomenda-se adaptar filtros de
   busca oficiais da instalação sem relaxar idempotência.
 - Não existe aprovação final automática, remediação, download, execução ou teste de software.
+
+## Atualização do servidor, backup e reversão
+
+Execute no servidor após o merge. O bloco não lê nem imprime o arquivo de credenciais:
+
+```bash
+set -e
+cd /opt/iagis-codex
+sudo docker compose --env-file /etc/iagis/iagis.env -f compose.yaml down
+sudo cp -a /etc/iagis/iagis.env "/etc/iagis/iagis.env.backup.$(date +%Y%m%d-%H%M%S)"
+sudo docker run --rm -v iagis-codex_iagis_data:/data -v /var/backups:/backup \
+  alpine sh -c 'tar czf /backup/iagis-data-before-ollama.tgz -C /data .'
+PREVIOUS_COMMIT="$(git rev-parse HEAD)"
+printf '%s\n' "$PREVIOUS_COMMIT" | sudo tee /var/backups/iagis-previous-commit >/dev/null
+sudo git fetch origin main
+sudo git reset --hard origin/main
+sudo sed -i -e 's/^AI_PROVIDER=.*/AI_PROVIDER=ollama/' \
+  -e 's/^AI_MODEL=.*/AI_MODEL=qwen3:4b-instruct-2507-q4_K_M/' \
+  -e 's/^IAGIS_DRY_RUN=.*/IAGIS_DRY_RUN=true/' /etc/iagis/iagis.env
+sudo sh -c 'grep -q "^IAGIS_MODE=" /etc/iagis/iagis.env || echo IAGIS_MODE=suggestion >>/etc/iagis/iagis.env'
+sudo sh -c 'grep -q "^OLLAMA_URL=" /etc/iagis/iagis.env || echo OLLAMA_URL=http://127.0.0.1:11434 >>/etc/iagis/iagis.env'
+sudo sh -c 'grep -q "^OLLAMA_TIMEOUT=" /etc/iagis/iagis.env || echo OLLAMA_TIMEOUT=120 >>/etc/iagis/iagis.env'
+sudo sh -c 'grep -q "^IAGIS_MAX_ATTEMPTS=" /etc/iagis/iagis.env || echo IAGIS_MAX_ATTEMPTS=3 >>/etc/iagis/iagis.env'
+sudo sh -c 'grep -q "^IAGIS_RETRY_DELAY=" /etc/iagis/iagis.env || echo IAGIS_RETRY_DELAY=300 >>/etc/iagis/iagis.env'
+sudo docker compose --env-file /etc/iagis/iagis.env -f compose.yaml build
+sudo docker compose --env-file /etc/iagis/iagis.env -f compose.yaml up -d
+sudo docker compose --env-file /etc/iagis/iagis.env -f compose.yaml logs --tail=100 iagis
+```
+
+Reversão do código (o backup SQLite permanece disponível em `/var/backups`):
+
+```bash
+cd /opt/iagis-codex
+OLD="$(sudo cat /var/backups/iagis-previous-commit)"
+sudo docker compose --env-file /etc/iagis/iagis.env -f compose.yaml down
+sudo git reset --hard "$OLD"
+sudo docker compose --env-file /etc/iagis/iagis.env -f compose.yaml build
+sudo docker compose --env-file /etc/iagis/iagis.env -f compose.yaml up -d
+```
+
+## Teste curto com chamados reais
+
+1. Confirme `IAGIS_DRY_RUN=true`, entidade `1`, usuário IAgis `1838` e os logs do monitor.
+2. Em um chamado não sensível da entidade 1, escreva `@iagis sugira uma resposta para este pedido`.
+3. Aguarde um ciclo e rode `sudo docker compose --env-file /etc/iagis/iagis.env -f
+   /opt/iagis-codex/compose.yaml run --rm iagis analyses --limit 10`.
+4. Rode o mesmo comando substituindo o final por `preview --analysis-id ID`; revise resumo,
+   perguntas, limitações e a sugestão.
+5. Repita com outro chamado contendo o mesmo texto e confirme que ambos aparecem.
+6. Não use `publish`: ele é bloqueado neste piloto.

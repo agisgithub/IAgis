@@ -80,3 +80,30 @@ Esta homologação documental e de governança não substitui validação do ins
 e assinatura, teste técnico, validação do EDR ou aprovação final para implantação. Nenhum instalador
 foi baixado, instalado ou executado por esta análise.
 """
+
+
+def format_suggestion(suggestion: "ResponseSuggestion") -> str:
+    """Prévia simples; deliberadamente não usa linguagem de homologação formal."""
+    from .suggestion_models import ResponseSuggestion
+    if not isinstance(suggestion, ResponseSuggestion):
+        raise TypeError("sugestão inválida")
+    return f"""SUGESTÃO DE RESPOSTA — REVISÃO HUMANA OBRIGATÓRIA
+
+Resumo do pedido
+{suggestion.resumo_pedido}
+
+Sugestão de resposta ao usuário
+{suggestion.sugestao_resposta}
+
+Informações faltantes
+{_items(suggestion.informacoes_faltantes)}
+
+Limitações
+{_items(suggestion.limitacoes)}
+
+Confiança declarada pelo modelo
+{suggestion.confianca:.0%}
+
+Esta sugestão não foi publicada no GLPI, não representa aprovação ou homologação e não confirma
+qualquer ação. Anexos não foram baixados nem executados.
+"""
