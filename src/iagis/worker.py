@@ -9,7 +9,7 @@ import structlog
 
 from .config import Settings
 from .glpi_client import GLPIClient
-from .governance_agent import GovernanceAgent
+from .ai_provider import GovernanceAI, build_governance_ai
 from .governance_models import GovernanceReport, RiskLevel, Verdict
 from .governance_rules import apply_rules
 from .mention_detector import detect_mention
@@ -25,9 +25,9 @@ class PublicationDenied(RuntimeError):
 
 class Worker:
     def __init__(self, settings: Settings, client: GLPIClient, repository: Repository,
-                 agent: GovernanceAgent | Any | None = None):
+                 agent: GovernanceAI | Any | None = None):
         self.settings, self.client, self.repository = settings, client, repository
-        self.agent = agent or GovernanceAgent(settings.openai_model)
+        self.agent = agent or build_governance_ai(settings)
 
     def _assert_entity(self, entity_id: int) -> None:
         if self.settings.authorized_entities and entity_id not in self.settings.authorized_entities:

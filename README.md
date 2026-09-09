@@ -2,7 +2,7 @@
 
 Agente Python para **homologação exclusivamente documental e de governança de softwares** em
 chamados do GLPI 11. Ele reage a `@IAgis`, pesquisa evidências com a ferramenta web oficial da
-OpenAI, produz saída Pydantic e submete o parecer a regras determinísticas. Nesta fase, o sistema
+Gemini (padrão) ou OpenAI, produz saída Pydantic e submete o parecer a regras determinísticas. Nesta fase, o sistema
 **não baixa, instala nem executa instaladores** e jamais encerra chamados.
 
 ## Arquitetura
@@ -42,8 +42,10 @@ ambiente do serviço. **Não crie `.env` com credenciais**.
 | `GLPI_URL` | sim | URL HTTPS do GLPI, sem `/apirest.php` |
 | `GLPI_APP_TOKEN` | sim | App-Token da integração |
 | `GLPI_USER_TOKEN` | sim | User-Token técnico, com privilégio mínimo |
-| `OPENAI_API_KEY` | sim | Chave da API OpenAI |
-| `OPENAI_MODEL` | sim | Modelo compatível com Agents SDK e saída estruturada |
+| `AI_PROVIDER` | não | `gemini` (padrão), `openai`; nomes `anthropic` e `ollama` reservados para adaptadores futuros |
+| `AI_MODEL` | não | Modelo do provedor; padrão `gemini-2.5-flash` |
+| `GEMINI_API_KEY` | com Gemini | Chave do Gemini AI Studio |
+| `OPENAI_API_KEY` | com OpenAI | Chave da API OpenAI |
 | `IAGIS_MENTION` | não | Menção; padrão `@IAgis` |
 | `IAGIS_DRY_RUN` | não | Padrão seguro `true` |
 | `IAGIS_POLL_INTERVAL` | não | Segundos entre ciclos (mínimo 5) |
@@ -69,6 +71,22 @@ python -m iagis.cli entities
 
 Use variáveis exportadas pelo shell/secret manager. `check` inicia a sessão, valida a conexão e
 sempre executa `killSession`; `entities` é somente leitura. O contexto raiz explícito é ID `0`.
+
+## Instalação assistida no Debian 13
+
+O instalador pergunta os segredos com entrada oculta, grava-os em `/etc/iagis/iagis.env` com modo
+`0600`, constrói o container, testa somente a conexão, lista entidades, pede a entidade e inicia o
+worker em dry-run. Baixe e revise antes de executar:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/agisgithub/IAgis/main/scripts/install-debian.sh \
+  -o /tmp/install-iagis.sh
+less /tmp/install-iagis.sh
+bash /tmp/install-iagis.sh
+```
+
+O script nunca cria `.env` dentro do repositório. Ele exige usuário com `sudo`, Debian 13+, Docker
+e Compose v2, detecta a arquitetura automaticamente e mantém publicação automática desabilitada.
 
 ## CLI
 

@@ -3,7 +3,7 @@ from pydantic import ValidationError
 from iagis.config import Settings
 
 BASE = dict(GLPI_URL="https://glpi.example", GLPI_APP_TOKEN="a", GLPI_USER_TOKEN="u",
-            OPENAI_API_KEY="o", OPENAI_MODEL="gpt-5-mini")
+            AI_PROVIDER="gemini", GEMINI_API_KEY="g", AI_MODEL="gemini-test")
 
 def test_config_and_lists(tmp_path):
     settings = Settings(**BASE, IAGIS_DATABASE_PATH=str(tmp_path/"x.db"),
@@ -19,3 +19,11 @@ def test_missing_variables():
 def test_tls_required():
     with pytest.raises(ValidationError):
         Settings(**{**BASE, "GLPI_URL": "http://unsafe"})
+
+def test_gemini_key_required():
+    with pytest.raises(ValidationError):
+        Settings(**{k:v for k,v in BASE.items() if k != "GEMINI_API_KEY"})
+
+def test_future_provider_can_be_configured_without_importing_adapter():
+    settings = Settings(**{**BASE, "AI_PROVIDER":"ollama", "GEMINI_API_KEY":""})
+    assert settings.ai_provider == "ollama"

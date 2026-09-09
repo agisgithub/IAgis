@@ -5,7 +5,7 @@ from iagis.repository import Repository
 from iagis.worker import PublicationDenied, Worker
 
 BASE=dict(GLPI_URL="https://glpi.example", GLPI_APP_TOKEN="a", GLPI_USER_TOKEN="u",
-          OPENAI_API_KEY="o", OPENAI_MODEL="gpt-5-mini")
+          AI_PROVIDER="gemini", GEMINI_API_KEY="g", AI_MODEL="gemini-test")
 
 class Client:
     def __init__(self): self.created=[]

@@ -2,20 +2,9 @@ services:
   iagis:
     build: .
     restart: unless-stopped
-    env_file: []
-    environment:
-      GLPI_URL: ${GLPI_URL:?required}
-      GLPI_APP_TOKEN: ${GLPI_APP_TOKEN:?required}
-      GLPI_USER_TOKEN: ${GLPI_USER_TOKEN:?required}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?required}
-      OPENAI_MODEL: ${OPENAI_MODEL:?required}
-      IAGIS_MENTION: ${IAGIS_MENTION:-@IAgis}
-      IAGIS_DRY_RUN: ${IAGIS_DRY_RUN:-true}
-      IAGIS_POLL_INTERVAL: ${IAGIS_POLL_INTERVAL:-60}
-      IAGIS_DATABASE_PATH: ${IAGIS_DATABASE_PATH:-/data/iagis.db}
-      IAGIS_ALLOWED_ENTITY_IDS: ${IAGIS_ALLOWED_ENTITY_IDS:?required}
-      IAGIS_AUTO_PUBLISH_VERDICTS: ${IAGIS_AUTO_PUBLISH_VERDICTS:-HOMOLOGADO,HOMOLOGADO_COM_RESTRICOES}
-      IAGIS_GLPI_USER_ID: ${IAGIS_GLPI_USER_ID:-}
+
+    env_file:
+      - ${IAGIS_ENV_FILE:-/etc/iagis/iagis.env}
     command: ["worker", "--entity-id", "${IAGIS_ENTITY_ID:?required}"]
     volumes:
       - iagis_data:/data
