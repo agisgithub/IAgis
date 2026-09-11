@@ -107,3 +107,19 @@ Confiança declarada pelo modelo
 Esta sugestão não foi publicada no GLPI, não representa aprovação ou homologação e não confirma
 qualquer ação. Anexos não foram baixados nem executados.
 """
+
+
+def format_suggestion_for_publication(suggestion: "ResponseSuggestion") -> str:
+    """Resposta operacional sem menção-gatilho e sem linguagem de homologação."""
+    from .suggestion_models import ResponseSuggestion
+    if not isinstance(suggestion, ResponseSuggestion):
+        raise TypeError("sugestão inválida")
+    missing = "\n".join(f"- {item}" for item in suggestion.informacoes_faltantes)
+    limitations = "\n".join(f"- {item}" for item in suggestion.limitacoes)
+    sections = ["Resposta IAgis", "", suggestion.sugestao_resposta]
+    if missing:
+        sections.extend(["", "Para prosseguirmos, precisamos destas informações:", missing])
+    if limitations:
+        sections.extend(["", "Limitações desta resposta:", limitations])
+    sections.extend(["", "Resposta gerada por IA para apoio ao atendimento; valide informações críticas."])
+    return "\n".join(sections)

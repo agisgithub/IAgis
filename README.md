@@ -2,8 +2,9 @@
 
 Agente Python para um piloto de atendimento assistido no GLPI 11. No modo padrão `suggestion`, ele
 reage a `@iagis` e usa o Ollama local para gerar uma **sugestão em português para revisão humana**.
-Não pesquisa a web, publica, aprova, homologa, encerra nem altera chamados. Os adaptadores anteriores
-de Gemini/OpenAI e o modo de governança permanecem preservados, mas fora deste piloto.
+Não pesquisa a web, aprova, homologa, encerra nem altera status. Em dry-run apenas salva a prévia;
+com ativação explícita de produção, publica a resposta no mesmo chamado. Gemini/OpenAI permanecem
+como adaptadores técnicos legados, não como fluxo de homologação do produto.
 
 ## Arquitetura
 
@@ -22,10 +23,10 @@ GLPI API V1 (somente leitura) ─> eventos ordenados/SQLite ─> Ollama no loopb
 - `ai_provider.py`: interface que preserva os adaptadores Gemini e OpenAI.
 - `governance_models.py` / `governance_rules.py`: contrato Pydantic e barreira determinística.
 - `repository.py`: migração, auditoria, claim atômico, retries e identidade de evento em SQLite.
-- `report_formatter.py` / `cli.py`: lista e prévia local; publicação bloqueada no piloto.
+- `report_formatter.py` / `cli.py`: prévia e publicação controlada de resposta operacional.
 
-O agente de IA não recebe cliente, token nem função de escrita no GLPI. O modo do piloto não chama
-`create_followup`; não existem operações de exclusão ou encerramento no cliente.
+O agente de IA não recebe cliente ou token. Somente o worker pode chamar `create_followup`; não
+existem operações de exclusão, aprovação, mudança de status ou encerramento no cliente.
 
 ## Configuração
 
@@ -91,7 +92,7 @@ bash /tmp/install-iagis.sh
 
 O script nunca cria `.env` dentro do repositório. Ele exige usuário com `sudo`, Debian 13+, Docker
 e Compose v2, detecta a arquitetura automaticamente, confirma que o modelo já existe e nunca baixa
-outro modelo. A publicação permanece desabilitada.
+outro modelo. O instalador mantém `IAGIS_DRY_RUN=true`; produção é sempre uma alteração manual.
 
 ## CLI
 
@@ -107,9 +108,9 @@ python -m iagis.cli publish --analysis-id ID [--confirm]
 python -m iagis.cli worker --entity-id ID
 ```
 
-No modo `suggestion`, `publish` é sempre bloqueado, inclusive com `--confirm` e independentemente de
-configuração. `preview` mostra a sugestão salva; `analyses` lista estado/tentativas/erro sem conteúdo
-do chamado; `retry` libera uma falha dentro do limite e tenta o mesmo evento novamente.
+`preview` mostra a sugestão salva; `analyses` lista estado/tentativas/erro sem conteúdo do chamado;
+`retry` libera uma falha dentro do limite. `publish` sem `--confirm` mostra somente a prévia; com
+`--confirm` publica apenas quando o dry-run estiver desativado.
 
 ## Página administrativa
 
@@ -167,7 +168,8 @@ skills são tratados como dados não confiáveis pelo modelo.
    dados não confiáveis; arquivos não são baixados ou executados.
 5. Ollama devolve JSON validado. Se a estrutura for inválida, há no máximo uma solicitação de
    correção; validade estrutural não é tratada como evidência factual.
-6. A sugestão fica no SQLite para `preview`. Nada é publicado no GLPI.
+6. Em dry-run a sugestão fica no SQLite. Em produção, o worker publica um ITILFollowup no mesmo
+   chamado e registra seu ID; a identidade do evento impede uma segunda publicação.
 7. Falhas transitórias aguardam `IAGIS_RETRY_DELAY` e respeitam `IAGIS_MAX_ATTEMPTS`; configuração
    inválida não entra em retry automático. `retry` permite tentativa administrativa dentro do limite.
 
@@ -208,6 +210,41 @@ ao container alcançar `127.0.0.1:11434`; o Ollama continua ligado somente ao lo
 ser exposto em `0.0.0.0`. `host.docker.internal` sozinho não resolveria um listener em loopback.
 Nenhuma credencial entra no build; o Compose exige injeção externa. Em produção prefira secrets do
 orquestrador em vez do ambiente quando disponível.
+
+### Ativação explícita de produção
+
+Antes de usar escrita, confirme no arquivo protegido (sem imprimir seu conteúdo):
+
+- `IAGIS_DRY_RUN=false`;
+- `IAGIS_MODE=suggestion`;
+- `IAGIS_GLPI_USER_ID` preenchido com o usuário técnico que escreve os acompanhamentos;
+- `IAGIS_ALLOWED_ENTITY_IDS` e `IAGIS_ENTITY_ID` coerentes;
+- User-Token com permissão mínima para criar `ITILFollowup` nessa entidade.
+
+O default do código continua sendo dry-run. O corpo publicado não contém `@IAgis`, evitando um novo
+gatilho; a aplicação também ignora acompanhamentos cujo autor seja `IAGIS_GLPI_USER_ID`. Esse token
+passa a possuir permissão de escrita de follow-up e deve ter escopo mínimo, rotação e auditoria.
+
+### Recuperar o admin em restart
+
+Defina uma senha forte sem mostrá-la no terminal e recrie somente o serviço admin:
+
+```bash
+read -rsp 'Nova senha administrativa: ' ADMIN_PASS; echo
+sudo sed -i '/^IAGIS_ADMIN_PASSWORD=/d;/^IAGIS_ADMIN_USER=/d;/^IAGIS_ADMIN_HOST=/d;/^IAGIS_ADMIN_PORT=/d' /etc/iagis/iagis.env
+printf 'IAGIS_ADMIN_USER=iagis\nIAGIS_ADMIN_PASSWORD=%s\nIAGIS_ADMIN_HOST=127.0.0.1\nIAGIS_ADMIN_PORT=8090\n' "$ADMIN_PASS" \
+  | sudo tee -a /etc/iagis/iagis.env >/dev/null
+unset ADMIN_PASS
+sudo chmod 600 /etc/iagis/iagis.env
+sudo docker compose --env-file /etc/iagis/iagis.env -f /opt/iagis-codex/compose.yaml \
+  --profile admin up -d --force-recreate admin
+sudo docker compose --env-file /etc/iagis/iagis.env -f /opt/iagis-codex/compose.yaml \
+  --profile admin ps
+sudo ss -lntp | grep '127.0.0.1:8090'
+```
+
+Acesse exclusivamente pelo túnel `ssh -N -L 8090:127.0.0.1:8090 agis@10.11.46.109`. Não altere
+`IAGIS_ADMIN_HOST` para `0.0.0.0`.
 
 ## Limitações do piloto
 

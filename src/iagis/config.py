@@ -40,6 +40,7 @@ class Settings(BaseSettings):
         alias="IAGIS_AUTO_PUBLISH_VERDICTS",
     )
     glpi_user_id: int | None = Field(default=None, alias="IAGIS_GLPI_USER_ID")
+    entity_id: int | None = Field(default=None, alias="IAGIS_ENTITY_ID")
 
     @field_validator("glpi_url")
     @classmethod
@@ -78,6 +79,14 @@ class Settings(BaseSettings):
             raise ValueError("GEMINI_API_KEY é obrigatória para AI_PROVIDER=gemini")
         if self.ai_provider == "openai" and not self.openai_api_key.get_secret_value():
             raise ValueError("OPENAI_API_KEY é obrigatória para AI_PROVIDER=openai")
+        if not self.dry_run and self.glpi_user_id is None:
+            raise ValueError("IAGIS_GLPI_USER_ID é obrigatório quando IAGIS_DRY_RUN=false")
+        if not self.dry_run and self.operation_mode != "suggestion":
+            raise ValueError("produção de atendimento exige IAGIS_MODE=suggestion")
+        if not self.dry_run and not self.authorized_entities:
+            raise ValueError("IAGIS_ALLOWED_ENTITY_IDS é obrigatória em produção")
+        if not self.dry_run and (self.entity_id is None or self.entity_id not in self.authorized_entities):
+            raise ValueError("IAGIS_ENTITY_ID deve pertencer a IAGIS_ALLOWED_ENTITY_IDS em produção")
         return self
 
     @property

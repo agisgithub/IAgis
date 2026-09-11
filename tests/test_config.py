@@ -29,3 +29,7 @@ def test_gemini_key_required():
 def test_future_provider_can_be_configured_without_importing_adapter():
     settings = Settings(**{**BASE, "AI_PROVIDER":"ollama", "GEMINI_API_KEY":""})
     assert settings.ai_provider == "ollama"
+
+def test_production_requires_technical_user():
+    with pytest.raises(ValidationError, match="IAGIS_GLPI_USER_ID"):
+        Settings(**{**BASE, "IAGIS_DRY_RUN": False})

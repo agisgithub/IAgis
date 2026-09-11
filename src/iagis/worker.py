@@ -18,6 +18,7 @@ from .mention_detector import Mention, detect_mention
 from .ollama_agent import OllamaConfigurationError
 from .ollama_agent import OllamaSuggestionAgent
 from .repository import Repository
+from .report_formatter import format_report, format_suggestion_for_publication
 from .skill_runtime import execute_skill
 from .suggestion_models import ResponseSuggestion
 
@@ -25,6 +26,10 @@ log = structlog.get_logger()
 
 
 class PublicationDenied(RuntimeError):
+    pass
+
+
+class PublicationError(RuntimeError):
     pass
 
 
@@ -119,8 +124,21 @@ class Worker:
                 if isinstance(report, GovernanceReport):
                     report = apply_rules(report)
                 self.repository.save_result(analysis_id, report, run_id)
-                log.info("result_saved_dry_run", analysis_id=analysis_id, ticket_id=ticket_id,
-                         result_type=type(report).__name__)
+                if self.settings.dry_run:
+                    log.info("result_saved_dry_run", analysis_id=analysis_id, ticket_id=ticket_id,
+                             result_type=type(report).__name__)
+                else:
+                    body = (format_suggestion_for_publication(report)
+                            if isinstance(report, ResponseSuggestion) else format_report(report))
+                    if not self.repository.begin_publication(analysis_id):
+                        raise PublicationDenied("análise não está disponível para publicação")
+                    try:
+                        publication_id = self.client.create_followup(ticket_id, entity_id, body)
+                    except Exception as exc:
+                        raise PublicationError(f"GLPI follow-up falhou: {type(exc).__name__}") from exc
+                    self.repository.mark_published(analysis_id, publication_id)
+                    log.info("published_followup", analysis_id=analysis_id, ticket_id=ticket_id,
+                             followup_id=publication_id)
                 results.append((analysis_id, report))
             except Exception as exc:
                 retryable = not isinstance(exc, (OllamaConfigurationError, PermissionError, ValueError))
@@ -139,12 +157,36 @@ class Worker:
         return await self.analyze_ticket(row["ticket_id"], row["entity_id"])
 
     def publish(self, analysis_id: int, *, confirm: bool) -> int:
-        # Piloto de sugestão é exclusivamente revisão local, independentemente de --confirm.
-        if self.settings.operation_mode == "suggestion":
-            raise PublicationDenied("modo suggestion nunca publica no GLPI")
+        if not confirm:
+            raise PublicationDenied("publicação exige --confirm")
         if self.settings.dry_run:
             raise PublicationDenied("dry-run ativo: publicação bloqueada")
-        raise PublicationDenied("publicação desabilitada neste piloto")
+        row = self.repository.get(analysis_id)
+        if row is None or not row["report"]:
+            raise PublicationDenied("análise inexistente ou sem resposta")
+        if row["published_at"]:
+            raise PublicationDenied("análise já publicada")
+        if not self.repository.begin_publication(analysis_id):
+            raise PublicationDenied("análise não está disponível para publicação")
+        try:
+            try:
+                result = ResponseSuggestion.model_validate_json(row["report"])
+                body = format_suggestion_for_publication(result)
+            except Exception:
+                result = GovernanceReport.model_validate_json(row["report"])
+                body = format_report(result)
+            followup_id = self.client.create_followup(row["ticket_id"], row["entity_id"], body)
+            self.repository.mark_published(analysis_id, followup_id)
+            log.info("published_followup", analysis_id=analysis_id, ticket_id=row["ticket_id"],
+                     followup_id=followup_id)
+            return followup_id
+        except Exception as exc:
+            cause = f"publication: {type(exc).__name__}: {str(exc)[:300]}"
+            self.repository.fail(analysis_id, cause, retryable=True,
+                                 retry_delay=self.settings.retry_delay)
+            log.error("publication_failed", analysis_id=analysis_id,
+                      ticket_id=row["ticket_id"], cause=cause)
+            raise
 
     async def run_forever(self, entity_id: int) -> None:
         self._assert_entity(entity_id)

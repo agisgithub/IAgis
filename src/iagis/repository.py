@@ -128,7 +128,7 @@ class Repository:
         retry_at = (datetime.now(UTC) + timedelta(seconds=retry_delay)).isoformat() if retryable else None
         with self.connection() as db:
             db.execute("""UPDATE analyses SET state='FAILED',error=?,retryable=?,next_retry_at=?
-                WHERE id=? AND state='PROCESSING'""", (error[:1000], int(retryable), retry_at, analysis_id))
+                WHERE id=? AND state!='PUBLISHED'""", (error[:1000], int(retryable), retry_at, analysis_id))
 
     def prepare_retry(self, analysis_id: int, max_attempts: int) -> sqlite3.Row:
         with self.connection() as db:
@@ -157,6 +157,15 @@ class Repository:
             db.execute("""UPDATE analyses SET state='PUBLISHED',published_at=?,publication_followup_id=?
                 WHERE id=? AND published_at IS NULL""",
                 (datetime.now(UTC).isoformat(), followup_id, analysis_id))
+
+    def begin_publication(self, analysis_id: int) -> bool:
+        """Claim de publicação; PUBLISHING exige reconciliação após crash incerto."""
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            updated = db.execute("""UPDATE analyses SET state='PUBLISHING'
+                WHERE id=? AND published_at IS NULL AND state IN ('SUGGESTED','ANALYZED')""",
+                                 (analysis_id,))
+            return updated.rowcount == 1
 
     def admin_rows(self, table: str) -> list[sqlite3.Row]:
         allowed = {"ai_models", "agents_config", "skills", "routing_rules"}

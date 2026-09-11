@@ -29,7 +29,7 @@ class Agent:
 
 def settings(tmp_path,**overrides):
     values={**BASE,"IAGIS_DATABASE_PATH":str(tmp_path/"db"),"IAGIS_DRY_RUN":True,
-            "IAGIS_ALLOWED_ENTITY_IDS":"2","IAGIS_GLPI_USER_ID":"9",**overrides}
+            "IAGIS_ALLOWED_ENTITY_IDS":"2","IAGIS_ENTITY_ID":"2","IAGIS_GLPI_USER_ID":"9",**overrides}
     return Settings(**values)
 
 @pytest.mark.asyncio
@@ -88,7 +88,39 @@ async def test_entity_isolation(tmp_path):
     worker=Worker(settings(tmp_path),Client(),Repository(tmp_path/"db"),Agent())
     with pytest.raises(PermissionError): await worker.analyze_ticket(1,8)
 
-def test_publication_always_blocked_in_pilot(tmp_path):
-    client=Client(); worker=Worker(settings(tmp_path),client,Repository(tmp_path/"db"),Agent())
-    with pytest.raises(PublicationDenied,match="nunca publica"): worker.publish(1,confirm=True)
-    assert client.created == []
+@pytest.mark.asyncio
+async def test_dry_run_does_not_publish(tmp_path):
+    client=Client(); repo=Repository(tmp_path/"db")
+    await Worker(settings(tmp_path),client,repo,Agent()).analyze_ticket(1,2)
+    assert client.created == [] and repo.get(1)["state"] == "SUGGESTED"
+
+@pytest.mark.asyncio
+async def test_production_publishes_once_and_does_not_retrigger(tmp_path):
+    client=Client(); repo=Repository(tmp_path/"db")
+    worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False),client,repo,Agent())
+    assert len(await worker.analyze_ticket(1,2)) == 1
+    assert len(client.created) == 1 and repo.get(1)["state"] == "PUBLISHED"
+    assert "@IAgis" not in client.created[0][2] and "@iagis" not in client.created[0][2].lower()
+    assert await worker.analyze_ticket(1,2) == []
+    assert len(client.created) == 1
+
+@pytest.mark.asyncio
+async def test_publication_failure_is_recorded(tmp_path):
+    class FailingClient(Client):
+        def create_followup(self,*args):
+            raise RuntimeError("GLPI unavailable")
+    client=FailingClient(); repo=Repository(tmp_path/"db")
+    worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False),client,repo,Agent())
+    assert await worker.analyze_ticket(1,2) == []
+    assert repo.get(1)["state"] == "FAILED"
+    assert "PublicationError" in repo.get(1)["error"]
+
+def test_manual_publish_requires_confirm_and_works_in_suggestion_mode(tmp_path):
+    client=Client(); repo=Repository(tmp_path/"db")
+    aid=repo.claim_event(1,2,None,"h","2:1:description:h",3)
+    repo.save_result(aid,SUGGESTION,"run")
+    worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False),client,repo,Agent())
+    with pytest.raises(PublicationDenied,match="confirm"): worker.publish(aid,confirm=False)
+    assert worker.publish(aid,confirm=True) == 99
+    with pytest.raises(PublicationDenied,match="já publicada"): worker.publish(aid,confirm=True)
+    assert len(client.created) == 1

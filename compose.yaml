@@ -32,6 +32,12 @@ services:
     tmpfs: [/tmp]
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,socket; s=socket.create_connection(('127.0.0.1',int(os.getenv('IAGIS_ADMIN_PORT','8090'))),2); s.close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 volumes:
   iagis_data:
   iagis_reports:

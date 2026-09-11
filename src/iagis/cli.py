@@ -90,10 +90,24 @@ def preview(analysis_id: int = typer.Option(...)) -> None:
 
 @app.command()
 def publish(analysis_id: int = typer.Option(...), confirm: bool = typer.Option(False, "--confirm")) -> None:
-    """Mantido por compatibilidade, mas bloqueado integralmente no piloto."""
+    """Exibe a prévia e publica somente com --confirm e dry-run desativado."""
     settings = _settings()
+    repository = Repository(settings.database_path)
+    row = repository.get(analysis_id)
+    if row is None or not row["report"]:
+        raise typer.BadParameter("análise inexistente ou sem resposta")
     try:
-        Worker(settings, None, Repository(settings.database_path)).publish(analysis_id, confirm=confirm)  # type: ignore[arg-type]
+        result = ResponseSuggestion.model_validate_json(row["report"])
+        typer.echo(format_suggestion(result))
+    except Exception:
+        typer.echo(format_report(GovernanceReport.model_validate_json(row["report"])))
+    if not confirm:
+        typer.echo("Prévia somente. Use --confirm para publicar.")
+        return
+    try:
+        with _client(settings) as client:
+            followup_id = Worker(settings, client, repository).publish(analysis_id, confirm=True)
+        typer.echo(f"Acompanhamento publicado: {followup_id}")
     except PublicationDenied as exc:
         typer.echo(f"Publicação bloqueada: {exc}", err=True)
         raise typer.Exit(2) from exc
@@ -135,7 +149,17 @@ def admin() -> None:
     import uvicorn
     settings = _settings()
     if not settings.admin_password.get_secret_value():
-        raise typer.BadParameter("IAGIS_ADMIN_PASSWORD é obrigatória")
+        import structlog
+        structlog.get_logger().error(
+            "admin_configuration_error",
+            reason="IAGIS_ADMIN_PASSWORD ausente ou vazia; defina-a em /etc/iagis/iagis.env",
+        )
+        typer.echo(
+            "ERRO: IAGIS_ADMIN_PASSWORD está ausente ou vazia. "
+            "Defina uma senha forte em /etc/iagis/iagis.env e recrie apenas o serviço admin.",
+            err=True,
+        )
+        raise typer.Exit(2)
     uvicorn.run("iagis.admin:app", host=settings.admin_host, port=settings.admin_port,
                 log_level="info", access_log=False)
 
