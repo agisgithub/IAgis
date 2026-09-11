@@ -8,7 +8,8 @@ COPY src ./src
 RUN pip install --no-cache-dir .
 USER iagis
 VOLUME ["/data", "/reports"]
+# Saúde do runtime apenas; sucesso de GLPI/Ollama é reportado separadamente nos logs.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-  CMD python -m iagis.cli check >/dev/null || exit 1
+  CMD python -c "import iagis" || exit 1
 ENTRYPOINT ["python", "-m", "iagis.cli"]
 CMD ["worker", "--entity-id", "0"]

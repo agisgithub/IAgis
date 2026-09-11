@@ -1,10 +1,12 @@
-import pytest
-from iagis.ai_provider import UnsupportedProvider, build_governance_ai
+from iagis.ai_provider import build_governance_ai
 from iagis.config import Settings
+from iagis.ollama_agent import OllamaSuggestionAgent
 
-BASE=dict(GLPI_URL="https://glpi.example",GLPI_APP_TOKEN="a",GLPI_USER_TOKEN="u",
-          AI_PROVIDER="ollama",AI_MODEL="local-model")
 
-def test_future_adapter_fails_clearly():
-    with pytest.raises(UnsupportedProvider, match="ainda não foi habilitado"):
-        build_governance_ai(Settings(**BASE))
+def test_ollama_provider_is_configurable():
+    settings = Settings(GLPI_URL="https://glpi.example", GLPI_APP_TOKEN="a", GLPI_USER_TOKEN="u",
+                        AI_PROVIDER="ollama", AI_MODEL="qwen-test", OLLAMA_URL="http://ollama:11434",
+                        OLLAMA_TIMEOUT=42)
+    agent = build_governance_ai(settings)
+    assert isinstance(agent, OllamaSuggestionAgent)
+    assert agent.model == "qwen-test" and agent.timeout == 42

@@ -12,7 +12,9 @@ def test_config_and_lists(tmp_path):
     assert settings.authorized_entities == {1, 2}
     assert "a" not in repr(settings.glpi_app_token)
 
-def test_missing_variables():
+def test_missing_variables(monkeypatch):
+    for name in ("GLPI_URL", "GLPI_APP_TOKEN", "GLPI_USER_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
     with pytest.raises(ValidationError):
         Settings()
 

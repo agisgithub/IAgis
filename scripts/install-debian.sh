@@ -34,11 +34,11 @@ GLPI_URL="$(ask 'URL HTTPS do GLPI' "$GLPI_DEFAULT")"
 GLPI_URL="${GLPI_URL%/}"
 APP_TOKEN="$(secret 'App-Token do GLPI')"
 USER_TOKEN="$(secret 'User-Token do usuário IAgis')"
-GEMINI_KEY="$(secret 'Chave da API do Gemini AI Studio')"
+ADMIN_PASSWORD="$(secret 'Senha da página administrativa')"
 IAGIS_USER_ID="$(ask 'ID numérico do usuário IAgis no GLPI')"
 [[ "$IAGIS_USER_ID" =~ ^[0-9]+$ ]] || die "o ID do IAgis deve ser numérico"
-MODEL="$(ask 'Modelo Gemini' 'gemini-2.5-flash')"
-for value in "$GLPI_URL" "$APP_TOKEN" "$USER_TOKEN" "$GEMINI_KEY" "$MODEL"; do validate_line "$value"; done
+MODEL="$(ask 'Modelo Ollama' 'qwen3:4b-instruct-2507-q4_K_M')"
+for value in "$GLPI_URL" "$APP_TOKEN" "$USER_TOKEN" "$ADMIN_PASSWORD" "$MODEL"; do validate_line "$value"; done
 
 info "Baixando o IAgis"
 if [[ -d "$INSTALL_DIR/.git" ]]; then
@@ -57,9 +57,18 @@ cat >"$TMP" <<CONFIG
 GLPI_URL=$GLPI_URL
 GLPI_APP_TOKEN=$APP_TOKEN
 GLPI_USER_TOKEN=$USER_TOKEN
-AI_PROVIDER=gemini
+AI_PROVIDER=ollama
 AI_MODEL=$MODEL
-GEMINI_API_KEY=$GEMINI_KEY
+IAGIS_MODE=suggestion
+OLLAMA_URL=http://127.0.0.1:11434
+OLLAMA_TIMEOUT=120
+IAGIS_MAX_ATTEMPTS=3
+IAGIS_RETRY_DELAY=300
+IAGIS_ADMIN_USER=iagis
+IAGIS_ADMIN_PASSWORD=$ADMIN_PASSWORD
+IAGIS_ADMIN_HOST=127.0.0.1
+IAGIS_ADMIN_PORT=8090
+GEMINI_API_KEY=
 OPENAI_API_KEY=
 IAGIS_MENTION=@IAgis
 IAGIS_DRY_RUN=true
@@ -71,11 +80,18 @@ IAGIS_GLPI_USER_ID=$IAGIS_USER_ID
 IAGIS_ENTITY_ID=0
 CONFIG
 sudo install -m 600 -o root -g root "$TMP" "$ENV_FILE"
-unset APP_TOKEN USER_TOKEN GEMINI_KEY
+unset APP_TOKEN USER_TOKEN ADMIN_PASSWORD
 
 compose() { sudo docker compose --env-file "$ENV_FILE" -f "$INSTALL_DIR/compose.yaml" "$@"; }
 info "Construindo o container"
 compose build
+
+info "Verificando o Ollama local sem baixar modelos"
+curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags >/dev/null || \
+  die "Ollama não respondeu em 127.0.0.1:11434"
+if ! curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags | grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"${MODEL//\//\\/}\""; then
+  die "modelo $MODEL não está instalado; nenhum modelo foi baixado"
+fi
 
 info "Testando a conexão com o GLPI (nenhum chamado será consultado)"
 compose run --rm iagis check --entity-id 0
@@ -94,7 +110,7 @@ sudo sed -i \
   -e "s/^IAGIS_ENTITY_ID=.*/IAGIS_ENTITY_ID=$ENTITY_ID/" "$ENV_FILE"
 
 info "Iniciando worker em DRY-RUN"
-compose up -d
+compose --profile admin up -d
 compose ps
 cat <<FINAL
 
@@ -103,6 +119,7 @@ Instalação concluída.
 - Configuração protegida: $ENV_FILE
 - Entidade: $ENTITY_ID
 - DRY-RUN: ativo (nenhum acompanhamento será publicado)
+- Administração: somente 127.0.0.1:8090 (use túnel SSH)
 
 Comandos úteis:
   sudo docker compose --env-file $ENV_FILE -f $INSTALL_DIR/compose.yaml ps
