@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     vpn_action_min_confidence: float = Field(
         default=0.80, ge=0.5, le=1, alias="IAGIS_VPN_ACTION_MIN_CONFIDENCE"
     )
+    vpn_max_event_age_minutes: int = Field(
+        default=30, ge=5, le=24 * 60, alias="IAGIS_VPN_MAX_EVENT_AGE_MINUTES"
+    )
 
     @field_validator("glpi_url")
     @classmethod

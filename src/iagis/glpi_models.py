@@ -34,4 +34,5 @@ class Ticket(BaseModel):
     category: str = "não confirmada"
     creator_id: int | None = None
     location_id: int | None = None
+    created_at: str | None = None
     raw: dict = Field(default_factory=dict, exclude=True)

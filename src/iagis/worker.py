@@ -44,6 +44,7 @@ class PublicationError(RuntimeError):
 class PendingMention:
     followup_id: int | None
     author_id: int | None
+    occurred_at: str
     mention: Mention
     sort_key: tuple[str, int]
     event_key: str
@@ -70,7 +71,7 @@ class Worker:
 
     def _mentions(self, ticket: Any, followups: list[Any]) -> list[PendingMention]:
         events: list[tuple[int | None, str, int | None, str, int]] = [
-            (None, ticket.description, ticket.creator_id, "", -1)
+            (None, ticket.description, ticket.creator_id, ticket.created_at or "", -1)
         ]
         for item in followups:
             events.append((item.id, item.content, item.author_id, item.date or "", item.id))
@@ -84,7 +85,8 @@ class Worker:
             # O hash representa a versão do conteúdo; a chave inclui escopo e origem do evento.
             event_key = f"{ticket.entity_id}:{ticket.id}:{source}:{mention.content_hash}"
             found.append(PendingMention(
-                followup_id, author_id, mention, (occurred_at, stable_id), event_key
+                followup_id, author_id, occurred_at, mention,
+                (occurred_at, stable_id), event_key
             ))
         return sorted(found, key=lambda event: event.sort_key)
 
@@ -111,6 +113,28 @@ class Worker:
                 message=question,
                 details=[f"Confiança da classificação: {plan.confidence:.0%}"],
             )
+        existing_operation = self.repository.get_vpn_operation_by_event(event.event_key)
+        if existing_operation is None:
+            try:
+                occurred_at = datetime.fromisoformat(event.occurred_at)
+                if occurred_at.tzinfo is None:
+                    occurred_at = occurred_at.astimezone()
+                age = datetime.now().astimezone() - occurred_at.astimezone()
+                fresh = timedelta(minutes=-5) <= age <= timedelta(
+                    minutes=self.settings.vpn_max_event_age_minutes
+                )
+            except (TypeError, ValueError):
+                fresh = False
+            if not fresh:
+                return VPNExecutionReport(
+                    action=plan.action,
+                    client_name=plan.client_name,
+                    status="STALE",
+                    message=(
+                        "Por segurança, uma ação OpenVPN antiga não é executada automaticamente. "
+                        "Um técnico atribuído deve registrar um novo acompanhamento com o pedido atual."
+                    ),
+                )
         if event.author_id is None:
             return VPNExecutionReport(
                 action=plan.action,

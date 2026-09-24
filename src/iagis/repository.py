@@ -303,3 +303,9 @@ class Repository:
     def get_vpn_operation(self, operation_id: int) -> sqlite3.Row | None:
         with self.connection() as db:
             return db.execute("SELECT * FROM vpn_operations WHERE id=?", (operation_id,)).fetchone()
+
+    def get_vpn_operation_by_event(self, event_key: str) -> sqlite3.Row | None:
+        with self.connection() as db:
+            return db.execute(
+                "SELECT * FROM vpn_operations WHERE event_key=?", (event_key,)
+            ).fetchone()

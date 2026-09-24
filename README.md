@@ -69,6 +69,7 @@ ambiente do serviço. **Não crie `.env` com credenciais**.
 | `IAGIS_VPN_BROKER_TOKEN` | com VPN | Segredo aleatório compartilhado, mínimo 32 caracteres |
 | `IAGIS_VPN_BROKER_URL` | não | HTTPS ou HTTP somente em loopback; padrão `127.0.0.1:8091` |
 | `IAGIS_VPN_ACTION_MIN_CONFIDENCE` | não | Abaixo deste valor o agente pergunta; padrão `0.80` |
+| `IAGIS_VPN_MAX_EVENT_AGE_MINUTES` | não | Bloqueia execução de eventos antigos; padrão 30 min |
 | `IAGIS_VPN_REMOTE_HOST` | com VPN | Endereço público gravado no perfil `.ovpn` |
 | `IAGIS_OPENVPN_ROOT` | com VPN | Diretório host da PKI/configuração existente |
 
@@ -198,6 +199,7 @@ skills são tratados como dados não confiáveis pelo modelo.
    confirmação. Operações ficam auditadas e são idempotentes por evento do GLPI.
 6. Pedido ambíguo, baixa confiança ou autor não autorizado gera uma resposta explicativa sem tocar
    na PKI.
+7. Eventos antigos nunca geram ação retroativa; um técnico precisa registrar um novo acompanhamento.
 
 ## Segurança
 

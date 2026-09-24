@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 
 from iagis.config import Settings
@@ -8,8 +10,8 @@ from iagis.suggestion_models import ResponseSuggestion
 from iagis.vpn_models import VPNAction, VPNActionPlan, VPNExecutionReport
 from iagis.worker import PublicationDenied, Worker
 
-BASE=dict(GLPI_URL="https://glpi.example", GLPI_APP_TOKEN="a", GLPI_USER_TOKEN="u",
-          AI_PROVIDER="ollama", AI_MODEL="qwen-test", IAGIS_MODE="suggestion")
+BASE={"GLPI_URL":"https://glpi.example", "GLPI_APP_TOKEN":"a", "GLPI_USER_TOKEN":"u",
+      "AI_PROVIDER":"ollama", "AI_MODEL":"qwen-test", "IAGIS_MODE":"suggestion"}
 SUGGESTION=ResponseSuggestion(resumo_pedido="Pedido",sugestao_resposta="Favor informar versão.",
                               informacoes_faltantes=["Versão"],limitacoes=["Sem aprovação"],confianca=.7)
 
@@ -146,7 +148,7 @@ class VPNClient(Client):
     def __init__(self, authorized=True):
         super().__init__(description="sem", followups=[
             Followup(id=12, content="@iagis crie uma VPN para João da Silva", author_id=7,
-                     date="2026-09-24 10:00:00")
+                     date=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"))
         ])
         self.authorized=authorized; self.attachments=[]
     def is_ticket_technician(self, *args): return self.authorized
@@ -205,3 +207,16 @@ async def test_vpn_retry_does_not_issue_or_attach_twice_after_publication_failur
     assert len(await worker.retry_analysis(1)) == 1
     assert len(broker.created) == 1 and len(client.attachments) == 1
     assert repo.get(1)["state"] == "PUBLISHED"
+
+@pytest.mark.asyncio
+async def test_stale_vpn_request_never_touches_broker(tmp_path):
+    client=VPNClient(); client.followups[0].date="2020-01-01 10:00:00"
+    broker=Broker(); planner=ActionPlanner(VPNActionPlan(
+        action=VPNAction.CREATE,client_name="joao",confidence=.99
+    ))
+    worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_VPN_ENABLED=True,
+                           IAGIS_VPN_BROKER_TOKEN="x"*32),
+                  client,Repository(tmp_path/"db"),Agent(),planner,broker)
+    results=await worker.analyze_ticket(1,2)
+    assert results[0][1].status == "STALE"
+    assert broker.created == [] and client.attachments == []

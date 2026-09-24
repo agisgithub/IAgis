@@ -118,7 +118,8 @@ class GLPIClient:
                       description=data.get("content", ""), requester=str(data.get("requester", "não confirmado")),
                       entity=str(data.get("entity", entity_id)), category=str(data.get("category", "não confirmada")),
                       creator_id=_optional_int(data.get("users_id_recipient")),
-                      location_id=_optional_int(data.get("locations_id")), raw=data)
+                      location_id=_optional_int(data.get("locations_id")),
+                      created_at=data.get("date"), raw=data)
 
     def list_tickets(self, entity_id: int) -> list[Ticket]:
         """Lista chamados visíveis na entidade; a paginação evita assumir limites do servidor."""
@@ -132,7 +133,8 @@ class GLPIClient:
                 description=data.get("content", ""), requester=str(data.get("requester", "não confirmado")),
                 entity=str(data.get("entity", entity_id)), category=str(data.get("category", "não confirmada")),
                 creator_id=_optional_int(data.get("users_id_recipient")),
-                location_id=_optional_int(data.get("locations_id")), raw=data,
+                location_id=_optional_int(data.get("locations_id")),
+                created_at=data.get("date"), raw=data,
             ))
         return tickets
 
