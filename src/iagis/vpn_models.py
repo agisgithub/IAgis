@@ -15,12 +15,12 @@ class VPNAction(StrEnum):
 
 
 class VPNActionPlan(BaseModel):
-    action: VPNAction = VPNAction.NONE
-    client_name: str | None = None
+    action: VPNAction
+    client_name: str | None
     confidence: float = Field(ge=0, le=1)
-    needs_clarification: bool = False
-    clarification_question: str | None = None
-    rationale: str = Field(default="", max_length=500)
+    needs_clarification: bool
+    clarification_question: str | None
+    rationale: str = Field(max_length=500)
 
     @model_validator(mode="after")
     def require_client_for_targeted_actions(self) -> VPNActionPlan:

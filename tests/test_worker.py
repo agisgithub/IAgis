@@ -159,7 +159,8 @@ class VPNClient(Client):
 async def test_authorized_vpn_create_attaches_profile_and_is_idempotent(tmp_path):
     client=VPNClient(); broker=Broker(); repo=Repository(tmp_path/"db")
     planner=ActionPlanner(VPNActionPlan(
-        action=VPNAction.CREATE,client_name="João da Silva",confidence=.99
+        action=VPNAction.CREATE,client_name="João da Silva",confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
     ))
     worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_VPN_ENABLED=True,
                            IAGIS_VPN_BROKER_TOKEN="x"*32),
@@ -175,7 +176,8 @@ async def test_authorized_vpn_create_attaches_profile_and_is_idempotent(tmp_path
 async def test_unauthorized_vpn_request_is_denied_without_broker_call(tmp_path):
     client=VPNClient(authorized=False); broker=Broker()
     planner=ActionPlanner(VPNActionPlan(
-        action=VPNAction.REVOKE,client_name="joao",confidence=.99
+        action=VPNAction.REVOKE,client_name="joao",confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
     ))
     worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_VPN_ENABLED=True,
                            IAGIS_VPN_BROKER_TOKEN="x"*32),
@@ -196,7 +198,8 @@ async def test_vpn_retry_does_not_issue_or_attach_twice_after_publication_failur
             return super().create_followup(*args)
     client=FlakyClient(); broker=Broker(); repo=Repository(tmp_path/"db")
     planner=ActionPlanner(VPNActionPlan(
-        action=VPNAction.CREATE,client_name="joao",confidence=.99
+        action=VPNAction.CREATE,client_name="joao",confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
     ))
     worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_VPN_ENABLED=True,
                            IAGIS_VPN_BROKER_TOKEN="x"*32),
@@ -212,7 +215,8 @@ async def test_vpn_retry_does_not_issue_or_attach_twice_after_publication_failur
 async def test_stale_vpn_request_never_touches_broker(tmp_path):
     client=VPNClient(); client.followups[0].date="2020-01-01 10:00:00"
     broker=Broker(); planner=ActionPlanner(VPNActionPlan(
-        action=VPNAction.CREATE,client_name="joao",confidence=.99
+        action=VPNAction.CREATE,client_name="joao",confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
     ))
     worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_VPN_ENABLED=True,
                            IAGIS_VPN_BROKER_TOKEN="x"*32),
