@@ -20,8 +20,20 @@ Use create apenas quando houver pedido claro para emitir/criar/liberar um perfil
 Use revoke apenas quando houver pedido claro para revogar/bloquear/remover um perfil VPN.
 Use status para consultar um perfil específico e list para inventário explícito.
 Problemas de conexão, dúvidas e menções incidentais a VPN não são ações: use none.
-Não invente client_name. Extraia um identificador curto da pessoa/dispositivo somente quando estiver
-claro no contexto; caso contrário marque needs_clarification e faça uma pergunta objetiva.
+Não invente client_name. Um nome completo de pessoa ou dispositivo informado no pedido já é um
+identificador válido: copie-o para client_name; a aplicação fará a normalização depois. Não peça uma
+confirmação adicional quando a ação e o nome estiverem explícitos. Só marque needs_clarification
+quando a ação for create, revoke ou status e realmente faltar o nome da pessoa/dispositivo.
+Para problemas de conexão e outros casos none, use client_name=null, needs_clarification=false e
+clarification_question=null, pois o fluxo normal de suporte cuidará da resposta.
+
+Exemplos normativos:
+- "crie um perfil VPN para João da Silva" => action=create, client_name="João da Silva",
+  confidence=0.99, needs_clarification=false, clarification_question=null.
+- "revogue o acesso OpenVPN joao-da-silva" => action=revoke, client_name="joao-da-silva",
+  confidence=0.99, needs_clarification=false, clarification_question=null.
+- "a VPN de João não conecta; ajude no diagnóstico" => action=none, client_name=null,
+  confidence=0.99, needs_clarification=false, clarification_question=null.
 """
 
 
