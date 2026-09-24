@@ -1,9 +1,11 @@
 """Formatação textual segura para acompanhamento GLPI."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from .governance_models import GovernanceReport
+from .suggestion_models import ResponseSuggestion
+from .vpn_models import VPNExecutionReport
 
 
 def _items(values: list[str]) -> str:
@@ -28,7 +30,7 @@ Finalidade
 {report.finalidade}
 
 Data
-{analysis_date or date.today()}
+{analysis_date or datetime.now().astimezone().date()}
 
 Veredito
 {report.veredito.value}
@@ -82,9 +84,8 @@ foi baixado, instalado ou executado por esta análise.
 """
 
 
-def format_suggestion(suggestion: "ResponseSuggestion") -> str:
+def format_suggestion(suggestion: ResponseSuggestion) -> str:
     """Prévia simples; deliberadamente não usa linguagem de homologação formal."""
-    from .suggestion_models import ResponseSuggestion
     if not isinstance(suggestion, ResponseSuggestion):
         raise TypeError("sugestão inválida")
     return f"""SUGESTÃO DE RESPOSTA — REVISÃO HUMANA OBRIGATÓRIA
@@ -109,9 +110,8 @@ qualquer ação. Anexos não foram baixados nem executados.
 """
 
 
-def format_suggestion_for_publication(suggestion: "ResponseSuggestion") -> str:
+def format_suggestion_for_publication(suggestion: ResponseSuggestion) -> str:
     """Resposta operacional sem menção-gatilho e sem linguagem de homologação."""
-    from .suggestion_models import ResponseSuggestion
     if not isinstance(suggestion, ResponseSuggestion):
         raise TypeError("sugestão inválida")
     missing = "\n".join(f"- {item}" for item in suggestion.informacoes_faltantes)
@@ -122,4 +122,19 @@ def format_suggestion_for_publication(suggestion: "ResponseSuggestion") -> str:
     if limitations:
         sections.extend(["", "Limitações desta resposta:", limitations])
     sections.extend(["", "Resposta gerada por IA para apoio ao atendimento; valide informações críticas."])
+    return "\n".join(sections)
+
+
+def format_vpn_report(report: VPNExecutionReport) -> str:
+    sections = ["Resposta IAgis — OpenVPN", "", report.message]
+    if report.client_name:
+        sections.extend(["", f"Identificador do perfil: {report.client_name}"])
+    if report.attachment_name:
+        sections.extend(["", f"Arquivo anexado ao chamado: {report.attachment_name}"])
+    if report.details:
+        sections.extend(["", "Detalhes:", _items(report.details)])
+    sections.extend([
+        "",
+        "A autorização foi validada contra os técnicos atribuídos ao chamado antes da operação.",
+    ])
     return "\n".join(sections)

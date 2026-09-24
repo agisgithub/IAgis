@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -41,6 +42,20 @@ class Settings(BaseSettings):
     )
     glpi_user_id: int | None = Field(default=None, alias="IAGIS_GLPI_USER_ID")
     entity_id: int | None = Field(default=None, alias="IAGIS_ENTITY_ID")
+    glpi_initial_lookback_hours: int = Field(
+        default=24, ge=1, le=24 * 30, alias="IAGIS_GLPI_INITIAL_LOOKBACK_HOURS"
+    )
+    glpi_poll_overlap_seconds: int = Field(
+        default=120, ge=0, le=3600, alias="IAGIS_GLPI_POLL_OVERLAP_SECONDS"
+    )
+    vpn_enabled: bool = Field(default=False, alias="IAGIS_VPN_ENABLED")
+    vpn_broker_url: str = Field(
+        default="http://127.0.0.1:8091", alias="IAGIS_VPN_BROKER_URL"
+    )
+    vpn_broker_token: SecretStr = Field(default=SecretStr(""), alias="IAGIS_VPN_BROKER_TOKEN")
+    vpn_action_min_confidence: float = Field(
+        default=0.80, ge=0.5, le=1, alias="IAGIS_VPN_ACTION_MIN_CONFIDENCE"
+    )
 
     @field_validator("glpi_url")
     @classmethod
@@ -74,7 +89,7 @@ class Settings(BaseSettings):
         return normalized
 
     @model_validator(mode="after")
-    def provider_credentials(self) -> "Settings":
+    def provider_credentials(self) -> Settings:
         if self.ai_provider == "gemini" and not self.gemini_api_key.get_secret_value():
             raise ValueError("GEMINI_API_KEY é obrigatória para AI_PROVIDER=gemini")
         if self.ai_provider == "openai" and not self.openai_api_key.get_secret_value():
@@ -87,6 +102,13 @@ class Settings(BaseSettings):
             raise ValueError("IAGIS_ALLOWED_ENTITY_IDS é obrigatória em produção")
         if not self.dry_run and (self.entity_id is None or self.entity_id not in self.authorized_entities):
             raise ValueError("IAGIS_ENTITY_ID deve pertencer a IAGIS_ALLOWED_ENTITY_IDS em produção")
+        if self.vpn_enabled and not self.vpn_broker_token.get_secret_value():
+            raise ValueError("IAGIS_VPN_BROKER_TOKEN é obrigatório quando IAGIS_VPN_ENABLED=true")
+        if self.vpn_enabled:
+            parsed = urlparse(self.vpn_broker_url)
+            loopback = parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+            if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
+                raise ValueError("IAGIS_VPN_BROKER_URL deve usar HTTPS ou HTTP no loopback")
         return self
 
     @property

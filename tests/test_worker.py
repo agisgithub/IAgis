@@ -1,9 +1,11 @@
 import pytest
+
 from iagis.config import Settings
-from iagis.glpi_models import Ticket, Followup
+from iagis.glpi_models import Followup, Ticket
 from iagis.ollama_agent import OllamaConfigurationError, OllamaError
 from iagis.repository import Repository
 from iagis.suggestion_models import ResponseSuggestion
+from iagis.vpn_models import VPNAction, VPNActionPlan, VPNExecutionReport
 from iagis.worker import PublicationDenied, Worker
 
 BASE=dict(GLPI_URL="https://glpi.example", GLPI_APP_TOKEN="a", GLPI_USER_TOKEN="u",
@@ -124,3 +126,82 @@ def test_manual_publish_requires_confirm_and_works_in_suggestion_mode(tmp_path):
     assert worker.publish(aid,confirm=True) == 99
     with pytest.raises(PublicationDenied,match="já publicada"): worker.publish(aid,confirm=True)
     assert len(client.created) == 1
+
+class ActionPlanner:
+    def __init__(self, plan): self.result = plan; self.contexts=[]
+    async def plan(self, context):
+        self.contexts.append(context)
+        return self.result, "planner-run"
+
+class Broker:
+    def __init__(self): self.created=[]; self.revoked=[]
+    def create(self, name):
+        self.created.append(name)
+        return {"name": name, "created": True}, b"client\n<key>private</key>\n"
+    def revoke(self, name): self.revoked.append(name); return {"revoked": True}
+    def status(self, name): return {"name": name, "status": "active"}
+    def list_clients(self): return [{"name":"joao", "status":"active"}]
+
+class VPNClient(Client):
+    def __init__(self, authorized=True):
+        super().__init__(description="sem", followups=[
+            Followup(id=12, content="@iagis crie uma VPN para João da Silva", author_id=7,
+                     date="2026-09-24 10:00:00")
+        ])
+        self.authorized=authorized; self.attachments=[]
+    def is_ticket_technician(self, *args): return self.authorized
+    def attach_document(self, ticket_id, entity_id, filename, content, mime):
+        self.attachments.append((ticket_id,entity_id,filename,content,mime)); return 55
+
+@pytest.mark.asyncio
+async def test_authorized_vpn_create_attaches_profile_and_is_idempotent(tmp_path):
+    client=VPNClient(); broker=Broker(); repo=Repository(tmp_path/"db")
+    planner=ActionPlanner(VPNActionPlan(
+        action=VPNAction.CREATE,client_name="João da Silva",confidence=.99
+    ))
+    worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_VPN_ENABLED=True,
+                           IAGIS_VPN_BROKER_TOKEN="x"*32),
+                  client,repo,Agent(),planner,broker)
+    results=await worker.analyze_ticket(1,2)
+    assert isinstance(results[0][1],VPNExecutionReport)
+    assert broker.created == ["joao-da-silva"]
+    assert client.attachments[0][2] == "joao-da-silva.ovpn"
+    assert len(client.created) == 1
+    assert await worker.analyze_ticket(1,2) == []
+
+@pytest.mark.asyncio
+async def test_unauthorized_vpn_request_is_denied_without_broker_call(tmp_path):
+    client=VPNClient(authorized=False); broker=Broker()
+    planner=ActionPlanner(VPNActionPlan(
+        action=VPNAction.REVOKE,client_name="joao",confidence=.99
+    ))
+    worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_VPN_ENABLED=True,
+                           IAGIS_VPN_BROKER_TOKEN="x"*32),
+                  client,Repository(tmp_path/"db"),Agent(),planner,broker)
+    results=await worker.analyze_ticket(1,2)
+    assert results[0][1].status == "DENIED"
+    assert broker.revoked == []
+    assert "não foi executada" in client.created[0][2]
+
+@pytest.mark.asyncio
+async def test_vpn_retry_does_not_issue_or_attach_twice_after_publication_failure(tmp_path):
+    class FlakyClient(VPNClient):
+        def __init__(self): super().__init__(); self.fail_once=True
+        def create_followup(self,*args):
+            if self.fail_once:
+                self.fail_once=False
+                raise RuntimeError("temporary")
+            return super().create_followup(*args)
+    client=FlakyClient(); broker=Broker(); repo=Repository(tmp_path/"db")
+    planner=ActionPlanner(VPNActionPlan(
+        action=VPNAction.CREATE,client_name="joao",confidence=.99
+    ))
+    worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_VPN_ENABLED=True,
+                           IAGIS_VPN_BROKER_TOKEN="x"*32),
+                  client,repo,Agent(),planner,broker)
+    assert await worker.analyze_ticket(1,2) == []
+    assert repo.get(1)["state"] == "FAILED"
+    assert len(broker.created) == 1 and len(client.attachments) == 1
+    assert len(await worker.retry_analysis(1)) == 1
+    assert len(broker.created) == 1 and len(client.attachments) == 1
+    assert repo.get(1)["state"] == "PUBLISHED"

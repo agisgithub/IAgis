@@ -1,4 +1,5 @@
 import sqlite3
+
 from iagis.repository import Repository
 
 
@@ -56,3 +57,25 @@ def test_admin_routing_and_bindings(tmp_path):
     route=repo.resolve_agent({"titulo":"Solicitação de Software"})
     assert route["agent_name"] == "Homologação"
     assert repo.agent_skills(1)[0]["name"] == "JSON"
+
+def test_runtime_cursor_and_vpn_operation_are_idempotent(tmp_path):
+    repo = Repository(tmp_path/"db")
+    repo.set_state("cursor", "2026-09-24T10:00:00-03:00")
+    assert repo.get_state("cursor") == "2026-09-24T10:00:00-03:00"
+    aid = repo.claim_event(1, 2, 3, "h", "event", 3)
+    assert repo.latest_detection_time(2) is not None
+    row = repo.begin_vpn_operation(
+        event_key="event", analysis_id=aid, ticket_id=1, entity_id=2,
+        followup_id=3, requester_user_id=7, action="create", client_name="joao",
+    )
+    assert row["state"] == "PROCESSING"
+    from iagis.vpn_models import VPNAction, VPNExecutionReport
+    report = VPNExecutionReport(
+        action=VPNAction.CREATE, client_name="joao", status="COMPLETED", message="ok"
+    )
+    repo.update_vpn_operation(row["id"], "COMPLETED", report=report, document_id=10)
+    same = repo.begin_vpn_operation(
+        event_key="event", analysis_id=aid, ticket_id=1, entity_id=2,
+        followup_id=3, requester_user_id=7, action="create", client_name="joao",
+    )
+    assert same["state"] == "COMPLETED" and same["document_id"] == 10

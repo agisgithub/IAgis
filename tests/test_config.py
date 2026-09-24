@@ -1,5 +1,6 @@
 import pytest
 from pydantic import ValidationError
+
 from iagis.config import Settings
 
 BASE = dict(GLPI_URL="https://glpi.example", GLPI_APP_TOKEN="a", GLPI_USER_TOKEN="u",
@@ -33,3 +34,13 @@ def test_future_provider_can_be_configured_without_importing_adapter():
 def test_production_requires_technical_user():
     with pytest.raises(ValidationError, match="IAGIS_GLPI_USER_ID"):
         Settings(**{**BASE, "IAGIS_DRY_RUN": False})
+
+def test_vpn_requires_token_and_loopback_or_tls():
+    with pytest.raises(ValidationError, match="IAGIS_VPN_BROKER_TOKEN"):
+        Settings(**BASE, IAGIS_VPN_ENABLED=True)
+    with pytest.raises(ValidationError, match="loopback"):
+        Settings(**BASE, IAGIS_VPN_ENABLED=True, IAGIS_VPN_BROKER_TOKEN="x"*32,
+                 IAGIS_VPN_BROKER_URL="http://vpn.example:8091")
+    settings = Settings(**BASE, IAGIS_VPN_ENABLED=True,
+                        IAGIS_VPN_BROKER_TOKEN="x"*32)
+    assert settings.vpn_enabled is True
