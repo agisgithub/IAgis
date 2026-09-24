@@ -1,13 +1,25 @@
 from contextlib import contextmanager
+
 from typer.testing import CliRunner
+
 from iagis import cli
 from iagis.config import Settings
 from iagis.repository import Repository
 from iagis.suggestion_models import ResponseSuggestion
+from iagis.vpn_models import VPNAction, VPNExecutionReport
+
 
 class Client:
     def __init__(self): self.calls=[]
     def create_followup(self,*args): self.calls.append(args); return 77
+
+
+def test_cli_formats_vpn_execution_report():
+    report=VPNExecutionReport(action=VPNAction.CREATE,client_name="joyce",status="COMPLETED",
+        message="Perfil criado.",attachment_name="joyce.ovpn")
+    output=cli._format_result(report)
+    assert "Perfil criado." in output
+    assert "joyce.ovpn" in output
 
 
 def test_cli_publish_confirm_in_suggestion_mode(monkeypatch,tmp_path):

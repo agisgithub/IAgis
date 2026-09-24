@@ -26,6 +26,14 @@ def _settings() -> Settings:
     return get_settings()
 
 
+def _format_result(result: ResponseSuggestion | VPNExecutionReport | GovernanceReport) -> str:
+    if isinstance(result, ResponseSuggestion):
+        return format_suggestion(result)
+    if isinstance(result, VPNExecutionReport):
+        return format_vpn_report(result)
+    return format_report(result)
+
+
 @contextmanager
 def _client(settings: Settings) -> Iterator[GLPIClient]:
     with GLPIClient(settings.glpi_url, settings.glpi_app_token.get_secret_value(),
@@ -75,7 +83,7 @@ def analyze(ticket_id: int = typer.Option(...), entity_id: int = typer.Option(..
         return
     for analysis_id, result in results:
         typer.echo(f"analysis_id={analysis_id}")
-        typer.echo(format_suggestion(result) if isinstance(result, ResponseSuggestion) else format_report(result))
+        typer.echo(_format_result(result))
 
 
 @app.command()
