@@ -2,6 +2,14 @@ from datetime import datetime
 
 import pytest
 
+from iagis.access_client import AccessBrokerError
+from iagis.access_models import (
+    AccessAction,
+    AccessActionPlan,
+    AccessExecutionReport,
+    AccessProvider,
+    AccessUserResult,
+)
 from iagis.config import Settings
 from iagis.glpi_models import Followup, Ticket
 from iagis.ollama_agent import OllamaConfigurationError, OllamaError
@@ -224,3 +232,117 @@ async def test_stale_vpn_request_never_touches_broker(tmp_path):
     results=await worker.analyze_ticket(1,2)
     assert results[0][1].status == "STALE"
     assert broker.created == [] and client.attachments == []
+
+class AccessBroker:
+    def __init__(self): self.calls=[]
+    def apply(self, provider, action, email):
+        self.calls.append((provider, action, email))
+        assigned = action != AccessAction.REVOKE
+        return AccessUserResult(
+            email=email, assigned=assigned, changed=True,
+            status="PENDING_SYNC", detail="aguardando SCIM",
+        )
+
+class AccessClient(Client):
+    def __init__(self, authorized=True, date=None):
+        super().__init__(description="sem", followups=[
+            Followup(
+                id=13,
+                content="@iagis libere Claude para maria@empresa.com",
+                author_id=7,
+                date=date or datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        ])
+        self.authorized=authorized
+    def is_ticket_technician(self, *args): return self.authorized
+
+@pytest.mark.asyncio
+async def test_authorized_access_grant_is_published_and_idempotent(tmp_path):
+    client=AccessClient(); broker=AccessBroker(); repo=Repository(tmp_path/"db")
+    planner=ActionPlanner(AccessActionPlan(
+        action=AccessAction.GRANT,provider=AccessProvider.CLAUDE,
+        user_emails=["maria@empresa.com"],confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
+    ))
+    worker=Worker(
+        settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_ACCESS_ENABLED=True,
+                 IAGIS_ACCESS_BROKER_TOKEN="x"*32),
+        client,repo,Agent(),access_action_planner=planner,access_client=broker,
+    )
+    results=await worker.analyze_ticket(1,2)
+    assert isinstance(results[0][1],AccessExecutionReport)
+    assert results[0][1].status == "PENDING_SYNC"
+    assert len(broker.calls) == 1 and len(client.created) == 1
+    assert "maria@empresa.com" in client.created[0][2]
+    assert await worker.analyze_ticket(1,2) == []
+
+@pytest.mark.asyncio
+async def test_access_request_requires_assigned_technician_and_fresh_event(tmp_path):
+    plan=AccessActionPlan(
+        action=AccessAction.REVOKE,provider=AccessProvider.CHATGPT,
+        user_emails=["maria@empresa.com"],confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
+    )
+    broker=AccessBroker()
+    denied=await Worker(
+        settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_ACCESS_ENABLED=True,
+                 IAGIS_ACCESS_BROKER_TOKEN="x"*32),
+        AccessClient(authorized=False),Repository(tmp_path/"denied"),Agent(),
+        access_action_planner=ActionPlanner(plan),access_client=broker,
+    ).analyze_ticket(1,2)
+    assert denied[0][1].status == "DENIED" and broker.calls == []
+
+    stale=await Worker(
+        settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_ACCESS_ENABLED=True,
+                 IAGIS_ACCESS_BROKER_TOKEN="x"*32),
+        AccessClient(date="2020-01-01 10:00:00"),Repository(tmp_path/"stale"),Agent(),
+        access_action_planner=ActionPlanner(plan),access_client=broker,
+    ).analyze_ticket(1,2)
+    assert stale[0][1].status == "STALE" and broker.calls == []
+
+@pytest.mark.asyncio
+async def test_access_retry_does_not_apply_twice_after_publication_failure(tmp_path):
+    class FlakyAccessClient(AccessClient):
+        def __init__(self): super().__init__(); self.fail_once=True
+        def create_followup(self,*args):
+            if self.fail_once:
+                self.fail_once=False
+                raise RuntimeError("temporary")
+            return super().create_followup(*args)
+    client=FlakyAccessClient(); broker=AccessBroker(); repo=Repository(tmp_path/"db")
+    plan=AccessActionPlan(
+        action=AccessAction.GRANT,provider=AccessProvider.CLAUDE,
+        user_emails=["maria@empresa.com"],confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
+    )
+    worker=Worker(
+        settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_ACCESS_ENABLED=True,
+                 IAGIS_ACCESS_BROKER_TOKEN="x"*32),
+        client,repo,Agent(),access_action_planner=ActionPlanner(plan),access_client=broker,
+    )
+    assert await worker.analyze_ticket(1,2) == []
+    assert len(broker.calls) == 1
+    assert len(await worker.retry_analysis(1)) == 1
+    assert len(broker.calls) == 1 and repo.get(1)["state"] == "PUBLISHED"
+
+@pytest.mark.asyncio
+async def test_access_business_rejection_is_reported_without_retry_loop(tmp_path):
+    class UnconfiguredBroker:
+        def apply(self, *args):
+            raise AccessBrokerError(
+                "provedor chatgpt não configurado", status_code=409
+            )
+    client=AccessClient(); repo=Repository(tmp_path/"db")
+    plan=AccessActionPlan(
+        action=AccessAction.GRANT,provider=AccessProvider.CHATGPT,
+        user_emails=["maria@empresa.com"],confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
+    )
+    result=await Worker(
+        settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_ACCESS_ENABLED=True,
+                 IAGIS_ACCESS_BROKER_TOKEN="x"*32),
+        client,repo,Agent(),access_action_planner=ActionPlanner(plan),
+        access_client=UnconfiguredBroker(),
+    ).analyze_ticket(1,2)
+    assert result[0][1].status == "REJECTED"
+    assert repo.get(1)["state"] == "PUBLISHED" and len(client.created) == 1

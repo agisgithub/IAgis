@@ -3,8 +3,8 @@
 Agente Python para um piloto de atendimento assistido no GLPI 11. No modo padrão `suggestion`, ele
 reage a `@iagis` e usa Ollama, Gemini ou OpenAI para gerar uma **sugestão em português**. Em
 dry-run apenas salva a prévia; com ativação explícita, publica a resposta no mesmo chamado. Pedidos
-OpenVPN explícitos passam por classificação estruturada, autorização determinística no GLPI e um
-broker local isolado antes de criar, consultar ou revogar um perfil.
+OpenVPN e gestão de acesso a Claude/ChatGPT passam por classificação estruturada, autorização
+determinística no GLPI e brokers locais isolados antes de qualquer alteração.
 
 ## Arquitetura
 
@@ -13,9 +13,8 @@ GLPI Search API ─> chamados alterados ─> eventos idempotentes/SQLite ─> pr
                                               │                              │
                                               ├──── sugestão estruturada ────┘
                                               │
-                                              └─ autorização GLPI ─> broker VPN ─> PKI
-                                                                         │
-                                                          anexo .ovpn + resposta no chamado
+                                              └─ autorização GLPI ─┬─> broker VPN ─> PKI
+                                                                  └─> broker acesso ─> Entra/SCIM
 ```
 
 - `glpi_client.py`: sessão por App/User Token, TLS, timeout, retries, HTTP 206 e paginação.
@@ -25,13 +24,15 @@ GLPI Search API ─> chamados alterados ─> eventos idempotentes/SQLite ─> pr
 - `ai_provider.py`: seleção de Ollama, Gemini ou OpenAI para o mesmo contrato de sugestão.
 - `vpn_action_planner.py`: interpretação estruturada; nunca concede autorização.
 - `vpn-broker/`: serviço mínimo no loopback; é o único componente com acesso à CA OpenVPN.
+- `access_action_planner.py`: extrai produto, ação e e-mails sem decidir autorização.
+- `access-broker/`: único componente com credencial Entra; restringe alterações a alvos fixos.
 - `governance_models.py` / `governance_rules.py`: contrato Pydantic e barreira determinística.
 - `repository.py`: migração, auditoria, claim atômico, retries e identidade de evento em SQLite.
 - `report_formatter.py` / `cli.py`: prévia e publicação controlada de resposta operacional.
 
 O modelo não recebe credenciais nem acesso à PKI. Somente o worker escreve acompanhamentos/anexos;
-somente o broker cria ou revoga certificados. Aprovação, mudança de status e encerramento continuam
-fora do cliente GLPI.
+somente os brokers alteram certificados ou grupos/aplicações Entra. Aprovação, mudança de status e
+encerramento continuam fora do cliente GLPI.
 
 ## Configuração
 
@@ -72,6 +73,12 @@ ambiente do serviço. **Não crie `.env` com credenciais**.
 | `IAGIS_VPN_MAX_EVENT_AGE_MINUTES` | não | Bloqueia execução de eventos antigos; padrão 30 min |
 | `IAGIS_VPN_REMOTE_HOST` | com VPN | Endereço público gravado no perfil `.ovpn` |
 | `IAGIS_OPENVPN_ROOT` | com VPN | Diretório host da PKI/configuração existente |
+| `IAGIS_ACCESS_ENABLED` | não | Habilita gestão Claude/ChatGPT; padrão `false` |
+| `IAGIS_ACCESS_BROKER_TOKEN` | com acesso | Segredo aleatório compartilhado, mínimo 32 caracteres |
+| `IAGIS_ACCESS_BROKER_URL` | não | HTTPS ou HTTP somente em loopback; padrão `127.0.0.1:8092` |
+| `IAGIS_ACCESS_ACTION_MIN_CONFIDENCE` | não | Abaixo deste valor o agente pergunta; padrão `0.90` |
+| `IAGIS_ACCESS_MAX_EVENT_AGE_MINUTES` | não | Bloqueia execução retroativa; padrão 30 min |
+| `IAGIS_ACCESS_ENV_FILE` | com acesso | Cofre do broker; padrão `/etc/iagis/access-broker.env` |
 
 As configurações falham cedo se faltarem valores obrigatórios ou se `GLPI_URL` não usar HTTPS.
 Tokens são `SecretStr`, nunca são impressos pelos comandos e os logs estruturados filtram campos
@@ -201,6 +208,22 @@ skills são tratados como dados não confiáveis pelo modelo.
    na PKI.
 7. Eventos antigos nunca geram ação retroativa; um técnico precisa registrar um novo acompanhamento.
 
+### Fluxo Claude e ChatGPT
+
+1. Somente pedidos explícitos de acesso são classificados. Produto e e-mail corporativo são
+   obrigatórios; o modelo não inventa identidade a partir de um nome.
+2. O mesmo controle determinístico de técnico atribuído, confiança, idade do evento, auditoria e
+   idempotência do fluxo OpenVPN é aplicado a cada usuário.
+3. O modo recomendado adiciona/remove o usuário dos grupos Entra previamente vinculados ao SCIM.
+   Todos os grupos configurados são removidos na revogação para evitar reprovisionamento.
+4. O broker retorna `PENDING_SYNC` quando altera o Entra. O acompanhamento não afirma que o assento
+   já existe: a conclusão deve ser confirmada após a sincronização do diretório.
+5. O modo alternativo `app_role` só atribui a Enterprise Application. Ele não cria assento dentro do
+   SaaS e não deve ser usado como substituto silencioso de SCIM.
+
+Veja [docs/access-management.md](docs/access-management.md) para requisitos de plano, permissões,
+cofre, ativação e teste de homologação.
+
 ## Segurança
 
 - TLS obrigatório, validação de certificado ativa, timeouts e retentativas limitadas.
@@ -215,6 +238,8 @@ skills são tratados como dados não confiáveis pelo modelo.
 - O container é não-root, read-only, sem capabilities, com `no-new-privileges` e volumes separados.
 - O worker não monta Docker socket, CA ou chave de cliente. Apenas o broker opcional monta a PKI,
   roda como o UID/GID proprietário e permanece sem capabilities e com filesystem raiz read-only.
+- A credencial Entra fica em `/etc/iagis/access-broker.env`, separado do ambiente do worker; o modelo
+  recebe apenas dados do chamado e nunca vê client secret ou bearer token.
 - Respostas devem ser revisadas: o Qwen é candidato ao piloto e pode errar ou omitir fatos. A
   sugestão não é pesquisa, homologação, aprovação nem autorização de implantação.
 
@@ -234,6 +259,8 @@ docker compose build
 docker compose up -d
 # Com gestão VPN habilitada:
 docker compose --profile vpn up -d --build
+# Com gestão Claude/ChatGPT habilitada:
+docker compose --profile access up -d --build
 ```
 
 O serviço reinicia `unless-stopped`, persiste `/data` e `/reports` e possui healthcheck apenas do
@@ -291,6 +318,8 @@ Acesse exclusivamente pelo túnel `ssh -N -L 8090:127.0.0.1:8090 agis@10.11.46.1
 - Os IDs dos campos Search API usados foram validados no GLPI 11 deste piloto; outra instalação deve
   validar `Ticket.id=2` e `Ticket.date_mod=19` com `listSearchOptions/Ticket`.
 - Não existe aprovação final automática, remediação, download, execução ou teste de software.
+- ChatGPT Business não oferece o fluxo SCIM descrito aqui. Sem ChatGPT Enterprise, Edu ou Healthcare,
+  a gestão de usuários permanece manual; o código não usa automação de navegador para contornar isso.
 
 ## Atualização do servidor, backup e reversão
 

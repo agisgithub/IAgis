@@ -79,3 +79,25 @@ def test_runtime_cursor_and_vpn_operation_are_idempotent(tmp_path):
         followup_id=3, requester_user_id=7, action="create", client_name="joao",
     )
     assert same["state"] == "COMPLETED" and same["document_id"] == 10
+
+def test_access_operation_is_audited_per_user_and_idempotent(tmp_path):
+    from iagis.access_models import AccessUserResult
+    repo = Repository(tmp_path/"db")
+    aid = repo.claim_event(1, 2, 3, "h", "event", 3)
+    row = repo.begin_access_operation(
+        operation_key="op-maria", event_key="event", analysis_id=aid,
+        ticket_id=1, entity_id=2, followup_id=3, requester_user_id=7,
+        provider="claude", action="grant", user_email="maria@empresa.com",
+    )
+    result = AccessUserResult(
+        email="maria@empresa.com", assigned=True, changed=True,
+        status="PENDING_SYNC", detail="aguardando SCIM",
+    )
+    repo.update_access_operation(row["id"], "COMPLETED", report=result)
+    same = repo.begin_access_operation(
+        operation_key="op-maria", event_key="event", analysis_id=aid,
+        ticket_id=1, entity_id=2, followup_id=3, requester_user_id=7,
+        provider="claude", action="grant", user_email="maria@empresa.com",
+    )
+    assert same["state"] == "COMPLETED"
+    assert repo.has_access_operation_for_event("event") is True

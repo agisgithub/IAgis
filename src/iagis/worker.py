@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -10,6 +11,14 @@ from typing import Any
 import structlog
 from pydantic import ValidationError
 
+from .access_action_planner import AccessActionPlanner, build_access_action_planner
+from .access_client import AccessBrokerClient, AccessBrokerError
+from .access_models import (
+    AccessAction,
+    AccessActionPlan,
+    AccessExecutionReport,
+    AccessUserResult,
+)
 from .ai_provider import GovernanceAI, build_governance_ai
 from .config import Settings
 from .glpi_client import GLPIClient
@@ -18,6 +27,7 @@ from .governance_rules import apply_rules
 from .mention_detector import Mention, detect_mention
 from .ollama_agent import OllamaConfigurationError, OllamaSuggestionAgent
 from .report_formatter import (
+    format_access_report,
     format_report,
     format_suggestion_for_publication,
     format_vpn_report,
@@ -54,15 +64,27 @@ class Worker:
     def __init__(self, settings: Settings, client: GLPIClient, repository: Repository,
                  agent: GovernanceAI | Any | None = None,
                  action_planner: VPNActionPlanner | Any | None = None,
-                 vpn_client: VPNBrokerClient | Any | None = None):
+                 vpn_client: VPNBrokerClient | Any | None = None,
+                 access_action_planner: AccessActionPlanner | Any | None = None,
+                 access_client: AccessBrokerClient | Any | None = None):
         self.settings, self.client, self.repository = settings, client, repository
         self.agent = agent or build_governance_ai(settings)
         self.action_planner = action_planner
         self.vpn_client = vpn_client
+        self.access_action_planner = access_action_planner
+        self.access_client = access_client
         if settings.vpn_enabled:
             self.action_planner = self.action_planner or build_vpn_action_planner(settings)
             self.vpn_client = self.vpn_client or VPNBrokerClient(
                 settings.vpn_broker_url, settings.vpn_broker_token.get_secret_value()
+            )
+        if settings.access_enabled:
+            self.access_action_planner = (
+                self.access_action_planner or build_access_action_planner(settings)
+            )
+            self.access_client = self.access_client or AccessBrokerClient(
+                settings.access_broker_url,
+                settings.access_broker_token.get_secret_value(),
             )
 
     def _assert_entity(self, entity_id: int) -> None:
@@ -98,6 +120,199 @@ class Worker:
         return any(term in text for term in (
             "vpn", "openvpn", ".ovpn", "rede privada virtual"
         ))
+
+    @staticmethod
+    def _is_access_candidate(context: dict[str, Any]) -> bool:
+        text = " ".join(str(context.get(key, "")) for key in (
+            "titulo", "descricao", "mensagem_gatilho", "categoria"
+        )).casefold()
+        provider = any(term in text for term in ("claude", "chatgpt", "chat gpt"))
+        action = any(term in text for term in (
+            "acesso", "assento", "cadeira", "licença", "licenca", "convite",
+            "convid", "liber", "adicion", "inclu", "bloque", "revog", "remov",
+        ))
+        return provider and action
+
+    @staticmethod
+    def _event_is_fresh(occurred_at_value: str, max_age_minutes: int) -> bool:
+        try:
+            occurred_at = datetime.fromisoformat(occurred_at_value)
+            if occurred_at.tzinfo is None:
+                occurred_at = occurred_at.astimezone()
+            age = datetime.now().astimezone() - occurred_at.astimezone()
+            return timedelta(minutes=-5) <= age <= timedelta(minutes=max_age_minutes)
+        except (TypeError, ValueError):
+            return False
+
+    async def _execute_access_action(self, *, plan: AccessActionPlan, event: PendingMention,
+                                     analysis_id: int, ticket: Any,
+                                     entity_id: int) -> AccessExecutionReport:
+        if (plan.needs_clarification
+                or plan.confidence < self.settings.access_action_min_confidence):
+            return AccessExecutionReport(
+                action=plan.action,
+                provider=plan.provider,
+                user_emails=plan.user_emails,
+                status="NEEDS_INFORMATION",
+                message=plan.clarification_question or (
+                    "Confirme o produto e informe o e-mail corporativo exato de cada usuário."
+                ),
+                details=[f"Confiança da classificação: {plan.confidence:.0%}"],
+            )
+        if plan.provider is None or not plan.user_emails:
+            return AccessExecutionReport(
+                action=plan.action,
+                provider=plan.provider,
+                user_emails=plan.user_emails,
+                status="NEEDS_INFORMATION",
+                message="Informe Claude ou ChatGPT e o e-mail corporativo exato de cada usuário.",
+            )
+        if (not self.repository.has_access_operation_for_event(event.event_key)
+                and not self._event_is_fresh(
+                    event.occurred_at, self.settings.access_max_event_age_minutes
+                )):
+            return AccessExecutionReport(
+                action=plan.action,
+                provider=plan.provider,
+                user_emails=plan.user_emails,
+                status="STALE",
+                message=(
+                    "Por segurança, um pedido antigo de gestão de acesso não é executado. "
+                    "Um técnico atribuído deve registrar um novo acompanhamento com o pedido atual."
+                ),
+            )
+        if event.author_id is None:
+            return AccessExecutionReport(
+                action=plan.action,
+                provider=plan.provider,
+                user_emails=plan.user_emails,
+                status="DENIED",
+                message=(
+                    "Não consegui confirmar a identidade de quem solicitou a ação. "
+                    "Peça a um técnico atribuído ao chamado para registrar o pedido."
+                ),
+            )
+        authorized = await asyncio.to_thread(
+            self.client.is_ticket_technician, ticket.id, entity_id, event.author_id
+        )
+        if not authorized:
+            return AccessExecutionReport(
+                action=plan.action,
+                provider=plan.provider,
+                user_emails=plan.user_emails,
+                status="DENIED",
+                message=(
+                    "A gestão de acesso não foi executada: o autor não está atribuído como "
+                    "técnico nem pertence a um grupo técnico deste chamado."
+                ),
+            )
+
+        results: list[AccessUserResult] = []
+        for email in plan.user_emails:
+            digest = hashlib.sha256(
+                f"{event.event_key}\0{plan.provider.value}\0{email}".encode()
+            ).hexdigest()
+            operation = self.repository.begin_access_operation(
+                operation_key=digest,
+                event_key=event.event_key,
+                analysis_id=analysis_id,
+                ticket_id=ticket.id,
+                entity_id=entity_id,
+                followup_id=event.followup_id,
+                requester_user_id=event.author_id,
+                provider=plan.provider.value,
+                action=plan.action.value,
+                user_email=email,
+            )
+            operation_id = int(operation["id"])
+            if operation["state"] == "COMPLETED" and operation["report"]:
+                results.append(AccessUserResult.model_validate_json(operation["report"]))
+                continue
+            if self.settings.dry_run:
+                result = AccessUserResult(
+                    email=email,
+                    assigned=False,
+                    status="DRY_RUN",
+                    detail="ação validada, mas não executada porque o modo dry-run está ativo",
+                )
+                self.repository.update_access_operation(
+                    operation_id, "DRY_RUN", report=result
+                )
+                results.append(result)
+                continue
+            try:
+                result = await asyncio.to_thread(
+                    self.access_client.apply, plan.provider, plan.action, email
+                )
+                self.repository.update_access_operation(
+                    operation_id, "COMPLETED", report=result
+                )
+                results.append(result)
+            except AccessBrokerError as exc:
+                if exc.retryable:
+                    self.repository.update_access_operation(
+                        operation_id, "FAILED",
+                        error=f"{type(exc).__name__}: {str(exc)[:300]}",
+                    )
+                    raise
+                result = AccessUserResult(
+                    email=email,
+                    assigned=False,
+                    status="REJECTED",
+                    detail=str(exc)[:300],
+                )
+                self.repository.update_access_operation(
+                    operation_id, "COMPLETED", report=result
+                )
+                results.append(result)
+            except Exception as exc:
+                self.repository.update_access_operation(
+                    operation_id, "FAILED",
+                    error=f"{type(exc).__name__}: {str(exc)[:300]}",
+                )
+                raise
+
+        if self.settings.dry_run:
+            status = "DRY_RUN"
+            message = "Pedido validado, sem alteração porque o modo dry-run está ativo."
+        elif any(result.status == "REJECTED" for result in results):
+            status = "PARTIAL" if any(result.changed for result in results) else "REJECTED"
+            message = (
+                "Um ou mais usuários não puderam ser processados. Consulte os detalhes; "
+                "alterações concluídas para outros usuários permanecem válidas."
+            )
+        elif plan.action == AccessAction.STATUS:
+            status = "COMPLETED"
+            message = f"Consulta de acesso ao {plan.provider.value} concluída no Entra."
+        elif any(result.changed for result in results):
+            verb = "liberação" if plan.action == AccessAction.GRANT else "revogação"
+            if any(result.status == "PENDING_SYNC" for result in results):
+                status = "PENDING_SYNC"
+                message = (
+                    f"A {verb} de acesso ao {plan.provider.value} foi aplicada no Entra. "
+                    "A conclusão no serviço depende da sincronização SCIM."
+                )
+            else:
+                status = "ENTRA_UPDATED"
+                message = (
+                    f"A {verb} foi aplicada à Enterprise Application no Entra. "
+                    "Esse modo não confirma criação ou remoção de assento dentro do serviço."
+                )
+        else:
+            status = "COMPLETED"
+            message = "Nenhuma alteração foi necessária; o estado solicitado já estava aplicado."
+        return AccessExecutionReport(
+            action=plan.action,
+            provider=plan.provider,
+            user_emails=plan.user_emails,
+            status=status,
+            message=message,
+            results=results,
+            details=[
+                "O broker aceita somente os grupos ou a aplicação Entra definidos na configuração.",
+                "Credenciais administrativas não são enviadas ao modelo de IA nem ao GLPI.",
+            ],
+        )
 
     async def _execute_vpn_action(self, *, plan: VPNActionPlan, event: PendingMention,
                                   analysis_id: int, ticket: Any,
@@ -290,7 +505,17 @@ class Worker:
                 "acompanhamento_gatilho_id": event.followup_id,
             }
             try:
-                if (self.settings.vpn_enabled and self._is_vpn_candidate(context)
+                if (self.settings.access_enabled and self._is_access_candidate(context)
+                        and self.access_action_planner is not None):
+                    access_plan, run_id = await self.access_action_planner.plan(context)
+                    if access_plan.action != AccessAction.NONE:
+                        report = await self._execute_access_action(
+                            plan=access_plan, event=event, analysis_id=analysis_id,
+                            ticket=ticket, entity_id=entity_id,
+                        )
+                    else:
+                        report, run_id = await self._analyze_response(context, analysis_id)
+                elif (self.settings.vpn_enabled and self._is_vpn_candidate(context)
                         and self.action_planner is not None):
                     plan, run_id = await self.action_planner.plan(context)
                     if plan.action != VPNAction.NONE:
@@ -311,6 +536,8 @@ class Worker:
                 else:
                     if isinstance(report, ResponseSuggestion):
                         body = format_suggestion_for_publication(report)
+                    elif isinstance(report, AccessExecutionReport):
+                        body = format_access_report(report)
                     elif isinstance(report, VPNExecutionReport):
                         body = format_vpn_report(report)
                     else:
@@ -391,11 +618,15 @@ class Worker:
                 body = format_suggestion_for_publication(result)
             except ValidationError:
                 try:
-                    result = VPNExecutionReport.model_validate_json(row["report"])
-                    body = format_vpn_report(result)
+                    result = AccessExecutionReport.model_validate_json(row["report"])
+                    body = format_access_report(result)
                 except ValidationError:
-                    result = GovernanceReport.model_validate_json(row["report"])
-                    body = format_report(result)
+                    try:
+                        result = VPNExecutionReport.model_validate_json(row["report"])
+                        body = format_vpn_report(result)
+                    except ValidationError:
+                        result = GovernanceReport.model_validate_json(row["report"])
+                        body = format_report(result)
             followup_id = self.client.create_followup(row["ticket_id"], row["entity_id"], body)
             self.repository.mark_published(analysis_id, followup_id)
             log.info("published_followup", analysis_id=analysis_id, ticket_id=row["ticket_id"],

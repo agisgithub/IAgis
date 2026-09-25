@@ -66,6 +66,20 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+  access-broker:
+    build: ./access-broker
+    profiles: ["access"]
+    restart: unless-stopped
+    env_file:
+      - ${IAGIS_ACCESS_ENV_FILE:-/etc/iagis/access-broker.env}
+    network_mode: host
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 volumes:
   iagis_data:
   iagis_reports:

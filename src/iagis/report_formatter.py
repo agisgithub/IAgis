@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
+from .access_models import AccessExecutionReport
 from .governance_models import GovernanceReport
 from .suggestion_models import ResponseSuggestion
 from .vpn_models import VPNExecutionReport
@@ -136,5 +137,29 @@ def format_vpn_report(report: VPNExecutionReport) -> str:
     sections.extend([
         "",
         "A autorização foi validada contra os técnicos atribuídos ao chamado antes da operação.",
+    ])
+    return "\n".join(sections)
+
+
+def format_access_report(report: AccessExecutionReport) -> str:
+    product = report.provider.value.capitalize() if report.provider else "não confirmado"
+    sections = [f"Resposta IAgis — Acesso {product}", "", report.message]
+    if report.results:
+        rows = []
+        for result in report.results:
+            state = "atribuído" if result.assigned else "não atribuído"
+            change = "alterado" if result.changed else "sem alteração"
+            rows.append(f"{result.email}: {state}; {change}; {result.detail}")
+        sections.extend(["", "Usuários:", _items(rows)])
+    elif report.user_emails:
+        sections.extend(["", "Usuários:", _items(report.user_emails)])
+    if report.details:
+        sections.extend(["", "Controles aplicados:", _items(report.details)])
+    sections.extend([
+        "",
+        (
+            "A identidade do solicitante foi validada contra os técnicos atribuídos ao chamado. "
+            "Quando houver SCIM, confirme a conclusão no serviço após a sincronização do diretório."
+        ),
     ])
     return "\n".join(sections)

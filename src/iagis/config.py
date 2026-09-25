@@ -59,6 +59,19 @@ class Settings(BaseSettings):
     vpn_max_event_age_minutes: int = Field(
         default=30, ge=5, le=24 * 60, alias="IAGIS_VPN_MAX_EVENT_AGE_MINUTES"
     )
+    access_enabled: bool = Field(default=False, alias="IAGIS_ACCESS_ENABLED")
+    access_broker_url: str = Field(
+        default="http://127.0.0.1:8092", alias="IAGIS_ACCESS_BROKER_URL"
+    )
+    access_broker_token: SecretStr = Field(
+        default=SecretStr(""), alias="IAGIS_ACCESS_BROKER_TOKEN"
+    )
+    access_action_min_confidence: float = Field(
+        default=0.90, ge=0.5, le=1, alias="IAGIS_ACCESS_ACTION_MIN_CONFIDENCE"
+    )
+    access_max_event_age_minutes: int = Field(
+        default=30, ge=5, le=24 * 60, alias="IAGIS_ACCESS_MAX_EVENT_AGE_MINUTES"
+    )
 
     @field_validator("glpi_url")
     @classmethod
@@ -112,6 +125,16 @@ class Settings(BaseSettings):
             loopback = parsed.hostname in {"127.0.0.1", "::1", "localhost"}
             if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
                 raise ValueError("IAGIS_VPN_BROKER_URL deve usar HTTPS ou HTTP no loopback")
+        if self.access_enabled and len(self.access_broker_token.get_secret_value()) < 32:
+            raise ValueError(
+                "IAGIS_ACCESS_BROKER_TOKEN deve ter 32+ caracteres quando "
+                "IAGIS_ACCESS_ENABLED=true"
+            )
+        if self.access_enabled:
+            parsed = urlparse(self.access_broker_url)
+            loopback = parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+            if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
+                raise ValueError("IAGIS_ACCESS_BROKER_URL deve usar HTTPS ou HTTP no loopback")
         return self
 
     @property
