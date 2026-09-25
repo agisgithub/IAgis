@@ -1,32 +1,38 @@
 # IAgis Agent
 
 Agente Python para um piloto de atendimento assistido no GLPI 11. No modo padrão `suggestion`, ele
-reage a `@iagis` e usa o Ollama local para gerar uma **sugestão em português para revisão humana**.
-Não pesquisa a web, aprova, homologa, encerra nem altera status. Em dry-run apenas salva a prévia;
-com ativação explícita de produção, publica a resposta no mesmo chamado. Gemini/OpenAI permanecem
-como adaptadores técnicos legados, não como fluxo de homologação do produto.
+reage a `@iagis` e usa Ollama, Gemini ou OpenAI para gerar uma **sugestão em português**. Em
+dry-run apenas salva a prévia; com ativação explícita, publica a resposta no mesmo chamado. Pedidos
+OpenVPN e gestão de acesso a Claude/ChatGPT passam por classificação estruturada, autorização
+determinística no GLPI e brokers locais isolados antes de qualquer alteração.
 
 ## Arquitetura
 
 ```text
-GLPI API V1 (somente leitura) ─> eventos ordenados/SQLite ─> Ollama no loopback do host
-                                           │                         │
-                                           └──── sugestão JSON ──────┘
-                                                        │
-                                             CLI de revisão humana
+GLPI Search API ─> chamados alterados ─> eventos idempotentes/SQLite ─> provedor de IA
+                                              │                              │
+                                              ├──── sugestão estruturada ────┘
+                                              │
+                                              └─ autorização GLPI ─┬─> broker VPN ─> PKI
+                                                                  └─> broker acesso ─> Entra/SCIM
 ```
 
 - `glpi_client.py`: sessão por App/User Token, TLS, timeout, retries, HTTP 206 e paginação.
-- `worker.py` e `mention_detector.py`: monitor, entidades autorizadas, prevenção de loop e retomada
-  pelo histórico completo.
+- `worker.py` e `mention_detector.py`: busca incremental por `date_mod`, entidades autorizadas,
+  cursor persistente com sobreposição, prevenção de loop e retomada idempotente.
 - `ollama_agent.py`: sugestão estruturada, timeout e uma única correção de JSON, sem pesquisa web.
-- `ai_provider.py`: interface que preserva os adaptadores Gemini e OpenAI.
+- `ai_provider.py`: seleção de Ollama, Gemini ou OpenAI para o mesmo contrato de sugestão.
+- `vpn_action_planner.py`: interpretação estruturada; nunca concede autorização.
+- `vpn-broker/`: serviço mínimo no loopback; é o único componente com acesso à CA OpenVPN.
+- `access_action_planner.py`: extrai produto, ação e e-mails sem decidir autorização.
+- `access-broker/`: único componente com credencial Entra; restringe alterações a alvos fixos.
 - `governance_models.py` / `governance_rules.py`: contrato Pydantic e barreira determinística.
 - `repository.py`: migração, auditoria, claim atômico, retries e identidade de evento em SQLite.
 - `report_formatter.py` / `cli.py`: prévia e publicação controlada de resposta operacional.
 
-O agente de IA não recebe cliente ou token. Somente o worker pode chamar `create_followup`; não
-existem operações de exclusão, aprovação, mudança de status ou encerramento no cliente.
+O modelo não recebe credenciais nem acesso à PKI. Somente o worker escreve acompanhamentos/anexos;
+somente os brokers alteram certificados ou grupos/aplicações Entra. Aprovação, mudança de status e
+encerramento continuam fora do cliente GLPI.
 
 ## Configuração
 
@@ -54,10 +60,25 @@ ambiente do serviço. **Não crie `.env` com credenciais**.
 | `IAGIS_MENTION` | não | Menção; padrão `@IAgis` |
 | `IAGIS_DRY_RUN` | não | Padrão seguro `true` |
 | `IAGIS_POLL_INTERVAL` | não | Segundos entre ciclos (mínimo 5) |
+| `IAGIS_GLPI_INITIAL_LOOKBACK_HOURS` | não | Janela inicial após primeiro start; padrão 24 h |
+| `IAGIS_GLPI_POLL_OVERLAP_SECONDS` | não | Sobreposição do cursor; padrão 120 s |
 | `IAGIS_DATABASE_PATH` | não | SQLite; padrão `data/iagis.db` |
 | `IAGIS_ALLOWED_ENTITY_IDS` | worker | IDs separados por vírgula |
 | `IAGIS_AUTO_PUBLISH_VERDICTS` | não | Vereditos aptos à automação |
 | `IAGIS_GLPI_USER_ID` | recomendado | ID técnico para ignorar os próprios comentários |
+| `IAGIS_VPN_ENABLED` | não | Habilita planejamento e execução OpenVPN; padrão `false` |
+| `IAGIS_VPN_BROKER_TOKEN` | com VPN | Segredo aleatório compartilhado, mínimo 32 caracteres |
+| `IAGIS_VPN_BROKER_URL` | não | HTTPS ou HTTP somente em loopback; padrão `127.0.0.1:8091` |
+| `IAGIS_VPN_ACTION_MIN_CONFIDENCE` | não | Abaixo deste valor o agente pergunta; padrão `0.80` |
+| `IAGIS_VPN_MAX_EVENT_AGE_MINUTES` | não | Bloqueia execução de eventos antigos; padrão 30 min |
+| `IAGIS_VPN_REMOTE_HOST` | com VPN | Endereço público gravado no perfil `.ovpn` |
+| `IAGIS_OPENVPN_ROOT` | com VPN | Diretório host da PKI/configuração existente |
+| `IAGIS_ACCESS_ENABLED` | não | Habilita gestão Claude/ChatGPT; padrão `false` |
+| `IAGIS_ACCESS_BROKER_TOKEN` | com acesso | Segredo aleatório compartilhado, mínimo 32 caracteres |
+| `IAGIS_ACCESS_BROKER_URL` | não | HTTPS ou HTTP somente em loopback; padrão `127.0.0.1:8092` |
+| `IAGIS_ACCESS_ACTION_MIN_CONFIDENCE` | não | Abaixo deste valor o agente pergunta; padrão `0.90` |
+| `IAGIS_ACCESS_MAX_EVENT_AGE_MINUTES` | não | Bloqueia execução retroativa; padrão 30 min |
+| `IAGIS_ACCESS_ENV_FILE` | com acesso | Cofre do broker; padrão `/etc/iagis/access-broker.env` |
 
 As configurações falham cedo se faltarem valores obrigatórios ou se `GLPI_URL` não usar HTTPS.
 Tokens são `SecretStr`, nunca são impressos pelos comandos e os logs estruturados filtram campos
@@ -159,19 +180,49 @@ skills são tratados como dados não confiáveis pelo modelo.
 
 ## Fluxo de análise e aprovação
 
-1. O monitor lista **todos os chamados visíveis retornados pela API na entidade**, sem filtro de
-   status ou data neste piloto, e procura a menção na descrição e nos acompanhamentos.
+1. O monitor consulta o Search API por chamados alterados desde um cursor persistente, com pequena
+   sobreposição. No primeiro start cobre a janela configurada, em vez de reler toda a base.
 2. A descrição vem primeiro; acompanhamentos são ordenados explicitamente por data e ID.
 3. A identidade contém entidade, chamado, origem/ID e hash da versão. Texto igual em eventos
    diferentes é processado; o mesmo evento não. Editar descrição ou acompanhamento cria nova versão.
 4. Comentários do próprio IAgis são ignorados. Histórico e somente metadados dos anexos entram como
    dados não confiáveis; arquivos não são baixados ou executados.
-5. Ollama devolve JSON validado. Se a estrutura for inválida, há no máximo uma solicitação de
-   correção; validade estrutural não é tratada como evidência factual.
+5. O provedor selecionado devolve JSON validado. Validade estrutural não é autorização nem prova
+   factual.
 6. Em dry-run a sugestão fica no SQLite. Em produção, o worker publica um ITILFollowup no mesmo
    chamado e registra seu ID; a identidade do evento impede uma segunda publicação.
 7. Falhas transitórias aguardam `IAGIS_RETRY_DELAY` e respeitam `IAGIS_MAX_ATTEMPTS`; configuração
    inválida não entra em retry automático. `retry` permite tentativa administrativa dentro do limite.
+
+### Fluxo OpenVPN
+
+1. Somente mensagens com contexto de VPN são enviadas ao classificador estruturado.
+2. Criação/revogação exige intenção clara, confiança mínima, nome inequívoco e autor identificado.
+3. O worker confirma pela API que o autor é técnico atribuído ao chamado ou membro de grupo técnico
+   atribuído. O modelo não participa dessa decisão.
+4. O broker escuta apenas no loopback, exige bearer token e valida nomes. Ele reutiliza a PKI
+   existente, mantém perfis em `0600` e atualiza o CRL ao revogar.
+5. Criação envia o perfil ao endpoint oficial `Document`, vincula-o via `Document_Item` e publica a
+   confirmação. Operações ficam auditadas e são idempotentes por evento do GLPI.
+6. Pedido ambíguo, baixa confiança ou autor não autorizado gera uma resposta explicativa sem tocar
+   na PKI.
+7. Eventos antigos nunca geram ação retroativa; um técnico precisa registrar um novo acompanhamento.
+
+### Fluxo Claude e ChatGPT
+
+1. Somente pedidos explícitos de acesso são classificados. Produto e e-mail corporativo são
+   obrigatórios; o modelo não inventa identidade a partir de um nome.
+2. O mesmo controle determinístico de técnico atribuído, confiança, idade do evento, auditoria e
+   idempotência do fluxo OpenVPN é aplicado a cada usuário.
+3. O modo recomendado adiciona/remove o usuário dos grupos Entra previamente vinculados ao SCIM.
+   Todos os grupos configurados são removidos na revogação para evitar reprovisionamento.
+4. O broker retorna `PENDING_SYNC` quando altera o Entra. O acompanhamento não afirma que o assento
+   já existe: a conclusão deve ser confirmada após a sincronização do diretório.
+5. O modo alternativo `app_role` só atribui a Enterprise Application. Ele não cria assento dentro do
+   SaaS e não deve ser usado como substituto silencioso de SCIM.
+
+Veja [docs/access-management.md](docs/access-management.md) para requisitos de plano, permissões,
+cofre, ativação e teste de homologação.
 
 ## Segurança
 
@@ -185,6 +236,10 @@ skills são tratados como dados não confiáveis pelo modelo.
   provedores externos.
 - SQLite deve ficar em volume protegido, com backup, retenção e permissões do usuário do serviço.
 - O container é não-root, read-only, sem capabilities, com `no-new-privileges` e volumes separados.
+- O worker não monta Docker socket, CA ou chave de cliente. Apenas o broker opcional monta a PKI,
+  roda como o UID/GID proprietário e permanece sem capabilities e com filesystem raiz read-only.
+- A credencial Entra fica em `/etc/iagis/access-broker.env`, separado do ambiente do worker; o modelo
+  recebe apenas dados do chamado e nunca vê client secret ou bearer token.
 - Respostas devem ser revisadas: o Qwen é candidato ao piloto e pode errar ou omitir fatos. A
   sugestão não é pesquisa, homologação, aprovação nem autorização de implantação.
 
@@ -202,6 +257,10 @@ periodicamente e remova imediatamente credenciais de operadores desligados.
 docker compose build
 # Exporte as variáveis, inclusive IAGIS_ENTITY_ID e IAGIS_ALLOWED_ENTITY_IDS
 docker compose up -d
+# Com gestão VPN habilitada:
+docker compose --profile vpn up -d --build
+# Com gestão Claude/ChatGPT habilitada:
+docker compose --profile access up -d --build
 ```
 
 O serviço reinicia `unless-stopped`, persiste `/data` e `/reports` e possui healthcheck apenas do
@@ -210,6 +269,11 @@ ao container alcançar `127.0.0.1:11434`; o Ollama continua ligado somente ao lo
 ser exposto em `0.0.0.0`. `host.docker.internal` sozinho não resolveria um listener em loopback.
 Nenhuma credencial entra no build; o Compose exige injeção externa. Em produção prefira secrets do
 orquestrador em vez do ambiente quando disponível.
+
+Para anexar perfis, o GLPI deve possuir um tipo de documento uploadable para a extensão `ovpn`. O
+diretório `${IAGIS_OPENVPN_ROOT}/profiles` deve existir e pertencer ao UID/GID configurado. O
+processo OpenVPN precisa conseguir atravessar o diretório que contém `crl.pem`; valide isso como o
+usuário `nobody` dentro do container e confira os logs após uma revogação.
 
 ### Ativação explícita de produção
 
@@ -250,10 +314,12 @@ Acesse exclusivamente pelo túnel `ssh -N -L 8090:127.0.0.1:8090 agis@10.11.46.1
 
 - A compatibilidade exata de campos/perfis depende da configuração GLPI 11; valide com conta de
   homologação e entidade escolhida.
-- Anexos não são obtidos nem inspecionados nesta fase; apenas metadados informam o parecer.
-- O polling lista chamados visíveis da entidade. Em bases grandes, recomenda-se adaptar filtros de
-  busca oficiais da instalação sem relaxar idempotência.
+- Anexos recebidos continuam sem download/execução; o único upload é o perfil criado pelo broker.
+- Os IDs dos campos Search API usados foram validados no GLPI 11 deste piloto; outra instalação deve
+  validar `Ticket.id=2` e `Ticket.date_mod=19` com `listSearchOptions/Ticket`.
 - Não existe aprovação final automática, remediação, download, execução ou teste de software.
+- ChatGPT Business não oferece o fluxo SCIM descrito aqui. Sem ChatGPT Enterprise, Edu ou Healthcare,
+  a gestão de usuários permanece manual; o código não usa automação de navegador para contornar isso.
 
 ## Atualização do servidor, backup e reversão
 

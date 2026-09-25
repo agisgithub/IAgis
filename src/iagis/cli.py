@@ -3,18 +3,26 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 import typer
+from pydantic import ValidationError
 
+from .access_models import AccessExecutionReport
 from .config import Settings, get_settings
 from .glpi_client import GLPIClient
 from .governance_models import GovernanceReport
 from .logging_config import configure_logging
-from .report_formatter import format_report, format_suggestion
+from .report_formatter import (
+    format_access_report,
+    format_report,
+    format_suggestion,
+    format_vpn_report,
+)
 from .repository import Repository
 from .suggestion_models import ResponseSuggestion
+from .vpn_models import VPNExecutionReport
 from .worker import PublicationDenied, Worker
 
 app = typer.Typer(help="IAgis Agent — sugestões de atendimento para revisão humana")
@@ -22,6 +30,17 @@ app = typer.Typer(help="IAgis Agent — sugestões de atendimento para revisão 
 
 def _settings() -> Settings:
     return get_settings()
+
+
+def _format_result(result: ResponseSuggestion | AccessExecutionReport |
+                   VPNExecutionReport | GovernanceReport) -> str:
+    if isinstance(result, ResponseSuggestion):
+        return format_suggestion(result)
+    if isinstance(result, VPNExecutionReport):
+        return format_vpn_report(result)
+    if isinstance(result, AccessExecutionReport):
+        return format_access_report(result)
+    return format_report(result)
 
 
 @contextmanager
@@ -73,7 +92,7 @@ def analyze(ticket_id: int = typer.Option(...), entity_id: int = typer.Option(..
         return
     for analysis_id, result in results:
         typer.echo(f"analysis_id={analysis_id}")
-        typer.echo(format_suggestion(result) if isinstance(result, ResponseSuggestion) else format_report(result))
+        typer.echo(_format_result(result))
 
 
 @app.command()
@@ -84,8 +103,14 @@ def preview(analysis_id: int = typer.Option(...)) -> None:
     try:
         result = ResponseSuggestion.model_validate_json(row["report"])
         typer.echo(format_suggestion(result))
-    except Exception:
-        typer.echo(format_report(GovernanceReport.model_validate_json(row["report"])))
+    except ValidationError:
+        try:
+            typer.echo(format_access_report(AccessExecutionReport.model_validate_json(row["report"])))
+        except ValidationError:
+            try:
+                typer.echo(format_vpn_report(VPNExecutionReport.model_validate_json(row["report"])))
+            except ValidationError:
+                typer.echo(format_report(GovernanceReport.model_validate_json(row["report"])))
 
 
 @app.command()
@@ -99,8 +124,14 @@ def publish(analysis_id: int = typer.Option(...), confirm: bool = typer.Option(F
     try:
         result = ResponseSuggestion.model_validate_json(row["report"])
         typer.echo(format_suggestion(result))
-    except Exception:
-        typer.echo(format_report(GovernanceReport.model_validate_json(row["report"])))
+    except ValidationError:
+        try:
+            typer.echo(format_access_report(AccessExecutionReport.model_validate_json(row["report"])))
+        except ValidationError:
+            try:
+                typer.echo(format_vpn_report(VPNExecutionReport.model_validate_json(row["report"])))
+            except ValidationError:
+                typer.echo(format_report(GovernanceReport.model_validate_json(row["report"])))
     if not confirm:
         typer.echo("Prévia somente. Use --confirm para publicar.")
         return

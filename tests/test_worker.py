@@ -1,13 +1,25 @@
+from datetime import datetime
+
 import pytest
+
+from iagis.access_client import AccessBrokerError
+from iagis.access_models import (
+    AccessAction,
+    AccessActionPlan,
+    AccessExecutionReport,
+    AccessProvider,
+    AccessUserResult,
+)
 from iagis.config import Settings
-from iagis.glpi_models import Ticket, Followup
+from iagis.glpi_models import Followup, Ticket
 from iagis.ollama_agent import OllamaConfigurationError, OllamaError
 from iagis.repository import Repository
 from iagis.suggestion_models import ResponseSuggestion
+from iagis.vpn_models import VPNAction, VPNActionPlan, VPNExecutionReport
 from iagis.worker import PublicationDenied, Worker
 
-BASE=dict(GLPI_URL="https://glpi.example", GLPI_APP_TOKEN="a", GLPI_USER_TOKEN="u",
-          AI_PROVIDER="ollama", AI_MODEL="qwen-test", IAGIS_MODE="suggestion")
+BASE={"GLPI_URL":"https://glpi.example", "GLPI_APP_TOKEN":"a", "GLPI_USER_TOKEN":"u",
+      "AI_PROVIDER":"ollama", "AI_MODEL":"qwen-test", "IAGIS_MODE":"suggestion"}
 SUGGESTION=ResponseSuggestion(resumo_pedido="Pedido",sugestao_resposta="Favor informar versão.",
                               informacoes_faltantes=["Versão"],limitacoes=["Sem aprovação"],confianca=.7)
 
@@ -124,3 +136,213 @@ def test_manual_publish_requires_confirm_and_works_in_suggestion_mode(tmp_path):
     assert worker.publish(aid,confirm=True) == 99
     with pytest.raises(PublicationDenied,match="já publicada"): worker.publish(aid,confirm=True)
     assert len(client.created) == 1
+
+class ActionPlanner:
+    def __init__(self, plan): self.result = plan; self.contexts=[]
+    async def plan(self, context):
+        self.contexts.append(context)
+        return self.result, "planner-run"
+
+class Broker:
+    def __init__(self): self.created=[]; self.revoked=[]
+    def create(self, name):
+        self.created.append(name)
+        return {"name": name, "created": True}, b"client\n<key>private</key>\n"
+    def revoke(self, name): self.revoked.append(name); return {"revoked": True}
+    def status(self, name): return {"name": name, "status": "active"}
+    def list_clients(self): return [{"name":"joao", "status":"active"}]
+
+class VPNClient(Client):
+    def __init__(self, authorized=True):
+        super().__init__(description="sem", followups=[
+            Followup(id=12, content="@iagis crie uma VPN para João da Silva", author_id=7,
+                     date=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"))
+        ])
+        self.authorized=authorized; self.attachments=[]
+    def is_ticket_technician(self, *args): return self.authorized
+    def attach_document(self, ticket_id, entity_id, filename, content, mime):
+        self.attachments.append((ticket_id,entity_id,filename,content,mime)); return 55
+
+@pytest.mark.asyncio
+async def test_authorized_vpn_create_attaches_profile_and_is_idempotent(tmp_path):
+    client=VPNClient(); broker=Broker(); repo=Repository(tmp_path/"db")
+    planner=ActionPlanner(VPNActionPlan(
+        action=VPNAction.CREATE,client_name="João da Silva",confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
+    ))
+    worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_VPN_ENABLED=True,
+                           IAGIS_VPN_BROKER_TOKEN="x"*32),
+                  client,repo,Agent(),planner,broker)
+    results=await worker.analyze_ticket(1,2)
+    assert isinstance(results[0][1],VPNExecutionReport)
+    assert broker.created == ["joao-da-silva"]
+    assert client.attachments[0][2] == "joao-da-silva.ovpn"
+    assert len(client.created) == 1
+    assert await worker.analyze_ticket(1,2) == []
+
+@pytest.mark.asyncio
+async def test_unauthorized_vpn_request_is_denied_without_broker_call(tmp_path):
+    client=VPNClient(authorized=False); broker=Broker()
+    planner=ActionPlanner(VPNActionPlan(
+        action=VPNAction.REVOKE,client_name="joao",confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
+    ))
+    worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_VPN_ENABLED=True,
+                           IAGIS_VPN_BROKER_TOKEN="x"*32),
+                  client,Repository(tmp_path/"db"),Agent(),planner,broker)
+    results=await worker.analyze_ticket(1,2)
+    assert results[0][1].status == "DENIED"
+    assert broker.revoked == []
+    assert "não foi executada" in client.created[0][2]
+
+@pytest.mark.asyncio
+async def test_vpn_retry_does_not_issue_or_attach_twice_after_publication_failure(tmp_path):
+    class FlakyClient(VPNClient):
+        def __init__(self): super().__init__(); self.fail_once=True
+        def create_followup(self,*args):
+            if self.fail_once:
+                self.fail_once=False
+                raise RuntimeError("temporary")
+            return super().create_followup(*args)
+    client=FlakyClient(); broker=Broker(); repo=Repository(tmp_path/"db")
+    planner=ActionPlanner(VPNActionPlan(
+        action=VPNAction.CREATE,client_name="joao",confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
+    ))
+    worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_VPN_ENABLED=True,
+                           IAGIS_VPN_BROKER_TOKEN="x"*32),
+                  client,repo,Agent(),planner,broker)
+    assert await worker.analyze_ticket(1,2) == []
+    assert repo.get(1)["state"] == "FAILED"
+    assert len(broker.created) == 1 and len(client.attachments) == 1
+    assert len(await worker.retry_analysis(1)) == 1
+    assert len(broker.created) == 1 and len(client.attachments) == 1
+    assert repo.get(1)["state"] == "PUBLISHED"
+
+@pytest.mark.asyncio
+async def test_stale_vpn_request_never_touches_broker(tmp_path):
+    client=VPNClient(); client.followups[0].date="2020-01-01 10:00:00"
+    broker=Broker(); planner=ActionPlanner(VPNActionPlan(
+        action=VPNAction.CREATE,client_name="joao",confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
+    ))
+    worker=Worker(settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_VPN_ENABLED=True,
+                           IAGIS_VPN_BROKER_TOKEN="x"*32),
+                  client,Repository(tmp_path/"db"),Agent(),planner,broker)
+    results=await worker.analyze_ticket(1,2)
+    assert results[0][1].status == "STALE"
+    assert broker.created == [] and client.attachments == []
+
+class AccessBroker:
+    def __init__(self): self.calls=[]
+    def apply(self, provider, action, email):
+        self.calls.append((provider, action, email))
+        assigned = action != AccessAction.REVOKE
+        return AccessUserResult(
+            email=email, assigned=assigned, changed=True,
+            status="PENDING_SYNC", detail="aguardando SCIM",
+        )
+
+class AccessClient(Client):
+    def __init__(self, authorized=True, date=None):
+        super().__init__(description="sem", followups=[
+            Followup(
+                id=13,
+                content="@iagis libere Claude para maria@empresa.com",
+                author_id=7,
+                date=date or datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        ])
+        self.authorized=authorized
+    def is_ticket_technician(self, *args): return self.authorized
+
+@pytest.mark.asyncio
+async def test_authorized_access_grant_is_published_and_idempotent(tmp_path):
+    client=AccessClient(); broker=AccessBroker(); repo=Repository(tmp_path/"db")
+    planner=ActionPlanner(AccessActionPlan(
+        action=AccessAction.GRANT,provider=AccessProvider.CLAUDE,
+        user_emails=["maria@empresa.com"],confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
+    ))
+    worker=Worker(
+        settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_ACCESS_ENABLED=True,
+                 IAGIS_ACCESS_BROKER_TOKEN="x"*32),
+        client,repo,Agent(),access_action_planner=planner,access_client=broker,
+    )
+    results=await worker.analyze_ticket(1,2)
+    assert isinstance(results[0][1],AccessExecutionReport)
+    assert results[0][1].status == "PENDING_SYNC"
+    assert len(broker.calls) == 1 and len(client.created) == 1
+    assert "maria@empresa.com" in client.created[0][2]
+    assert await worker.analyze_ticket(1,2) == []
+
+@pytest.mark.asyncio
+async def test_access_request_requires_assigned_technician_and_fresh_event(tmp_path):
+    plan=AccessActionPlan(
+        action=AccessAction.REVOKE,provider=AccessProvider.CHATGPT,
+        user_emails=["maria@empresa.com"],confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
+    )
+    broker=AccessBroker()
+    denied=await Worker(
+        settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_ACCESS_ENABLED=True,
+                 IAGIS_ACCESS_BROKER_TOKEN="x"*32),
+        AccessClient(authorized=False),Repository(tmp_path/"denied"),Agent(),
+        access_action_planner=ActionPlanner(plan),access_client=broker,
+    ).analyze_ticket(1,2)
+    assert denied[0][1].status == "DENIED" and broker.calls == []
+
+    stale=await Worker(
+        settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_ACCESS_ENABLED=True,
+                 IAGIS_ACCESS_BROKER_TOKEN="x"*32),
+        AccessClient(date="2020-01-01 10:00:00"),Repository(tmp_path/"stale"),Agent(),
+        access_action_planner=ActionPlanner(plan),access_client=broker,
+    ).analyze_ticket(1,2)
+    assert stale[0][1].status == "STALE" and broker.calls == []
+
+@pytest.mark.asyncio
+async def test_access_retry_does_not_apply_twice_after_publication_failure(tmp_path):
+    class FlakyAccessClient(AccessClient):
+        def __init__(self): super().__init__(); self.fail_once=True
+        def create_followup(self,*args):
+            if self.fail_once:
+                self.fail_once=False
+                raise RuntimeError("temporary")
+            return super().create_followup(*args)
+    client=FlakyAccessClient(); broker=AccessBroker(); repo=Repository(tmp_path/"db")
+    plan=AccessActionPlan(
+        action=AccessAction.GRANT,provider=AccessProvider.CLAUDE,
+        user_emails=["maria@empresa.com"],confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
+    )
+    worker=Worker(
+        settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_ACCESS_ENABLED=True,
+                 IAGIS_ACCESS_BROKER_TOKEN="x"*32),
+        client,repo,Agent(),access_action_planner=ActionPlanner(plan),access_client=broker,
+    )
+    assert await worker.analyze_ticket(1,2) == []
+    assert len(broker.calls) == 1
+    assert len(await worker.retry_analysis(1)) == 1
+    assert len(broker.calls) == 1 and repo.get(1)["state"] == "PUBLISHED"
+
+@pytest.mark.asyncio
+async def test_access_business_rejection_is_reported_without_retry_loop(tmp_path):
+    class UnconfiguredBroker:
+        def apply(self, *args):
+            raise AccessBrokerError(
+                "provedor chatgpt não configurado", status_code=409
+            )
+    client=AccessClient(); repo=Repository(tmp_path/"db")
+    plan=AccessActionPlan(
+        action=AccessAction.GRANT,provider=AccessProvider.CHATGPT,
+        user_emails=["maria@empresa.com"],confidence=.99,
+        needs_clarification=False,clarification_question=None,rationale="pedido explícito",
+    )
+    result=await Worker(
+        settings(tmp_path,IAGIS_DRY_RUN=False,IAGIS_ACCESS_ENABLED=True,
+                 IAGIS_ACCESS_BROKER_TOKEN="x"*32),
+        client,repo,Agent(),access_action_planner=ActionPlanner(plan),
+        access_client=UnconfiguredBroker(),
+    ).analyze_ticket(1,2)
+    assert result[0][1].status == "REJECTED"
+    assert repo.get(1)["state"] == "PUBLISHED" and len(client.created) == 1

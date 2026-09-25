@@ -1,9 +1,10 @@
 import pytest
 from pydantic import ValidationError
+
 from iagis.config import Settings
 
-BASE = dict(GLPI_URL="https://glpi.example", GLPI_APP_TOKEN="a", GLPI_USER_TOKEN="u",
-            AI_PROVIDER="gemini", GEMINI_API_KEY="g", AI_MODEL="gemini-test")
+BASE = {"GLPI_URL":"https://glpi.example", "GLPI_APP_TOKEN":"a", "GLPI_USER_TOKEN":"u",
+        "AI_PROVIDER":"gemini", "GEMINI_API_KEY":"g", "AI_MODEL":"gemini-test"}
 
 def test_config_and_lists(tmp_path):
     settings = Settings(**BASE, IAGIS_DATABASE_PATH=str(tmp_path/"x.db"),
@@ -33,3 +34,23 @@ def test_future_provider_can_be_configured_without_importing_adapter():
 def test_production_requires_technical_user():
     with pytest.raises(ValidationError, match="IAGIS_GLPI_USER_ID"):
         Settings(**{**BASE, "IAGIS_DRY_RUN": False})
+
+def test_vpn_requires_token_and_loopback_or_tls():
+    with pytest.raises(ValidationError, match="IAGIS_VPN_BROKER_TOKEN"):
+        Settings(**BASE, IAGIS_VPN_ENABLED=True)
+    with pytest.raises(ValidationError, match="loopback"):
+        Settings(**BASE, IAGIS_VPN_ENABLED=True, IAGIS_VPN_BROKER_TOKEN="x"*32,
+                 IAGIS_VPN_BROKER_URL="http://vpn.example:8091")
+    settings = Settings(**BASE, IAGIS_VPN_ENABLED=True,
+                        IAGIS_VPN_BROKER_TOKEN="x"*32)
+    assert settings.vpn_enabled is True
+
+def test_access_requires_long_token_and_private_broker():
+    with pytest.raises(ValidationError, match=r"32\+"):
+        Settings(**BASE, IAGIS_ACCESS_ENABLED=True, IAGIS_ACCESS_BROKER_TOKEN="curto")
+    with pytest.raises(ValidationError, match="loopback"):
+        Settings(**BASE, IAGIS_ACCESS_ENABLED=True, IAGIS_ACCESS_BROKER_TOKEN="x"*32,
+                 IAGIS_ACCESS_BROKER_URL="http://access.example:8092")
+    settings = Settings(**BASE, IAGIS_ACCESS_ENABLED=True,
+                        IAGIS_ACCESS_BROKER_TOKEN="x"*32)
+    assert settings.access_enabled is True

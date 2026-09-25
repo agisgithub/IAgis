@@ -19,6 +19,15 @@ class UnsupportedProvider(ValueError):
 
 def build_governance_ai(settings: Settings) -> GovernanceAI:
     """Cria o adaptador escolhido sem expor credenciais à camada do worker."""
+    if settings.operation_mode == "suggestion" and settings.ai_provider in {"gemini", "openai"}:
+        from .cloud_suggestion_agent import GeminiSuggestionAgent, OpenAISuggestionAgent
+        if settings.ai_provider == "gemini":
+            return GeminiSuggestionAgent(
+                settings.gemini_api_key.get_secret_value(), settings.ai_model
+            )
+        return OpenAISuggestionAgent(
+            settings.openai_api_key.get_secret_value(), settings.ai_model
+        )
     if settings.ai_provider == "ollama":
         from .ollama_agent import OllamaSuggestionAgent
         if settings.operation_mode != "suggestion":

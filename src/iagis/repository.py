@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Iterator
 
 from pydantic import BaseModel
 
@@ -71,8 +71,46 @@ class Repository:
                     priority INTEGER NOT NULL DEFAULT 100, field TEXT NOT NULL,
                     pattern TEXT NOT NULL, agent_id INTEGER NOT NULL REFERENCES agents_config(id),
                     enabled INTEGER NOT NULL DEFAULT 1);
+                CREATE TABLE IF NOT EXISTS runtime_state (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS vpn_operations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT NOT NULL UNIQUE,
+                    analysis_id INTEGER NOT NULL REFERENCES analyses(id),
+                    ticket_id INTEGER NOT NULL,
+                    entity_id INTEGER NOT NULL,
+                    followup_id INTEGER,
+                    requester_user_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    client_name TEXT,
+                    state TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    document_id INTEGER,
+                    report TEXT,
+                    error TEXT);
+                CREATE TABLE IF NOT EXISTS access_operations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    operation_key TEXT NOT NULL UNIQUE,
+                    event_key TEXT NOT NULL,
+                    analysis_id INTEGER NOT NULL REFERENCES analyses(id),
+                    ticket_id INTEGER NOT NULL,
+                    entity_id INTEGER NOT NULL,
+                    followup_id INTEGER,
+                    requester_user_id INTEGER NOT NULL,
+                    provider TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    user_email TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    report TEXT,
+                    error TEXT);
             """)
-            db.execute("PRAGMA user_version=3")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_vpn_operations_ticket ON vpn_operations(ticket_id, entity_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_access_operations_ticket ON access_operations(ticket_id, entity_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_access_operations_event ON access_operations(event_key)")
+            db.execute("PRAGMA user_version=5")
 
     def _migrate_legacy(self, db: sqlite3.Connection) -> None:
         """Remove UNIQUE global do hash sem perder IDs, relatórios ou publicações."""
@@ -152,6 +190,14 @@ class Repository:
             return db.execute("""SELECT id,ticket_id,entity_id,state,detected_at,attempt_count,error
                 FROM analyses ORDER BY id DESC LIMIT ?""", (limit,)).fetchall()
 
+    def latest_detection_time(self, entity_id: int) -> str | None:
+        with self.connection() as db:
+            row = db.execute(
+                "SELECT MAX(detected_at) AS detected_at FROM analyses WHERE entity_id=?",
+                (entity_id,),
+            ).fetchone()
+            return str(row["detected_at"]) if row and row["detected_at"] else None
+
     def mark_published(self, analysis_id: int, followup_id: int) -> None:
         with self.connection() as db:
             db.execute("""UPDATE analyses SET state='PUBLISHED',published_at=?,publication_followup_id=?
@@ -224,3 +270,117 @@ class Repository:
         with self.connection() as db:
             return db.execute("""SELECT s.* FROM skills s JOIN agent_skills x ON x.skill_id=s.id
                 WHERE x.agent_id=? AND s.enabled=1 ORDER BY x.position,s.id""", (agent_id,)).fetchall()
+
+    def get_state(self, key: str) -> str | None:
+        with self.connection() as db:
+            row = db.execute("SELECT value FROM runtime_state WHERE key=?", (key,)).fetchone()
+            return str(row["value"]) if row else None
+
+    def set_state(self, key: str, value: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self.connection() as db:
+            db.execute("""INSERT INTO runtime_state(key,value,updated_at) VALUES(?,?,?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
+                       (key, value, now))
+
+    def begin_vpn_operation(self, *, event_key: str, analysis_id: int, ticket_id: int,
+                            entity_id: int, followup_id: int | None,
+                            requester_user_id: int, action: str,
+                            client_name: str | None) -> sqlite3.Row:
+        now = datetime.now(UTC).isoformat()
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("""INSERT OR IGNORE INTO vpn_operations
+                (event_key,analysis_id,ticket_id,entity_id,followup_id,requester_user_id,
+                 action,client_name,state,requested_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?, 'PROCESSING',?,?)""",
+                       (event_key, analysis_id, ticket_id, entity_id, followup_id,
+                        requester_user_id, action, client_name, now, now))
+            row = db.execute("SELECT * FROM vpn_operations WHERE event_key=?", (event_key,)).fetchone()
+            if row is None:
+                raise RuntimeError("não foi possível registrar a operação VPN")
+            if row["action"] != action or (row["client_name"] or None) != (client_name or None):
+                raise ValueError("o plano VPN mudou durante a repetição do mesmo evento")
+            if row["state"] != "COMPLETED":
+                db.execute("UPDATE vpn_operations SET state='PROCESSING',updated_at=?,error=NULL WHERE id=?",
+                           (now, row["id"]))
+                row = db.execute("SELECT * FROM vpn_operations WHERE id=?", (row["id"],)).fetchone()
+            return row
+
+    def update_vpn_operation(self, operation_id: int, state: str, *,
+                             report: BaseModel | None = None,
+                             document_id: int | None = None,
+                             error: str | None = None) -> None:
+        now = datetime.now(UTC).isoformat()
+        report_json = report.model_dump_json() if report is not None else None
+        with self.connection() as db:
+            db.execute("""UPDATE vpn_operations SET state=?,updated_at=?,
+                document_id=COALESCE(?,document_id),report=COALESCE(?,report),error=? WHERE id=?""",
+                       (state, now, document_id, report_json,
+                        error[:1000] if error else None, operation_id))
+
+    def get_vpn_operation(self, operation_id: int) -> sqlite3.Row | None:
+        with self.connection() as db:
+            return db.execute("SELECT * FROM vpn_operations WHERE id=?", (operation_id,)).fetchone()
+
+    def get_vpn_operation_by_event(self, event_key: str) -> sqlite3.Row | None:
+        with self.connection() as db:
+            return db.execute(
+                "SELECT * FROM vpn_operations WHERE event_key=?", (event_key,)
+            ).fetchone()
+
+    def has_access_operation_for_event(self, event_key: str) -> bool:
+        with self.connection() as db:
+            return db.execute(
+                "SELECT 1 FROM access_operations WHERE event_key=? LIMIT 1", (event_key,)
+            ).fetchone() is not None
+
+    def begin_access_operation(self, *, operation_key: str, event_key: str,
+                               analysis_id: int, ticket_id: int, entity_id: int,
+                               followup_id: int | None, requester_user_id: int,
+                               provider: str, action: str,
+                               user_email: str) -> sqlite3.Row:
+        now = datetime.now(UTC).isoformat()
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("""INSERT OR IGNORE INTO access_operations
+                (operation_key,event_key,analysis_id,ticket_id,entity_id,followup_id,
+                 requester_user_id,provider,action,user_email,state,requested_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?, 'PROCESSING',?,?)""",
+                       (operation_key, event_key, analysis_id, ticket_id, entity_id,
+                        followup_id, requester_user_id, provider, action, user_email,
+                        now, now))
+            row = db.execute(
+                "SELECT * FROM access_operations WHERE operation_key=?", (operation_key,)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("não foi possível registrar a operação de acesso")
+            if (row["event_key"] != event_key or row["provider"] != provider
+                    or row["action"] != action or row["user_email"] != user_email):
+                raise ValueError("o plano de acesso mudou durante a repetição do mesmo evento")
+            if row["state"] != "COMPLETED":
+                db.execute(
+                    "UPDATE access_operations SET state='PROCESSING',updated_at=?,error=NULL WHERE id=?",
+                    (now, row["id"]),
+                )
+                row = db.execute(
+                    "SELECT * FROM access_operations WHERE id=?", (row["id"],)
+                ).fetchone()
+            return row
+
+    def update_access_operation(self, operation_id: int, state: str, *,
+                                report: BaseModel | None = None,
+                                error: str | None = None) -> None:
+        now = datetime.now(UTC).isoformat()
+        report_json = report.model_dump_json() if report is not None else None
+        with self.connection() as db:
+            db.execute("""UPDATE access_operations SET state=?,updated_at=?,
+                report=COALESCE(?,report),error=? WHERE id=?""",
+                       (state, now, report_json, error[:1000] if error else None,
+                        operation_id))
+
+    def get_access_operation(self, operation_key: str) -> sqlite3.Row | None:
+        with self.connection() as db:
+            return db.execute(
+                "SELECT * FROM access_operations WHERE operation_key=?", (operation_key,)
+            ).fetchone()

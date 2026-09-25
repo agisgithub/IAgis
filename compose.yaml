@@ -4,6 +4,8 @@ services:
     restart: unless-stopped
     env_file:
       - ${IAGIS_ENV_FILE:-/etc/iagis/iagis.env}
+    environment:
+      TZ: ${TZ:-America/Sao_Paulo}
     # Linux: compartilha somente a pilha de rede do host. Assim 127.0.0.1:11434
     # alcança o Ollama ligado ao loopback sem expô-lo em 0.0.0.0.
     network_mode: host
@@ -38,6 +40,47 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+  vpn-broker:
+    build: ./vpn-broker
+    profiles: ["vpn"]
+    restart: unless-stopped
+    environment:
+      HOME: /tmp
+      IAGIS_VPN_BROKER_HOST: 127.0.0.1
+      IAGIS_VPN_BROKER_PORT: ${IAGIS_VPN_BROKER_PORT:-8091}
+      IAGIS_VPN_BROKER_TOKEN: ${IAGIS_VPN_BROKER_TOKEN:?required}
+      IAGIS_VPN_REMOTE_HOST: ${IAGIS_VPN_REMOTE_HOST:?required}
+      IAGIS_VPN_REMOTE_PORT: ${IAGIS_VPN_REMOTE_PORT:-1194}
+    network_mode: host
+    user: "${IAGIS_VPN_BROKER_UID:-1000}:${IAGIS_VPN_BROKER_GID:-1000}"
+    volumes:
+      - ${IAGIS_OPENVPN_ROOT:-/home/agis/openvpn-wcar}/pki:/vpn/pki
+      - ${IAGIS_OPENVPN_ROOT:-/home/agis/openvpn-wcar}/config/ca.crt:/vpn/ca.crt:ro
+      - ${IAGIS_OPENVPN_ROOT:-/home/agis/openvpn-wcar}/config/tls-crypt.key:/vpn/tls-crypt.key:ro
+      - ${IAGIS_OPENVPN_ROOT:-/home/agis/openvpn-wcar}/config/crl.pem:/vpn/server-crl.pem
+      - ${IAGIS_OPENVPN_ROOT:-/home/agis/openvpn-wcar}/profiles:/vpn/profiles
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+  access-broker:
+    build: ./access-broker
+    profiles: ["access"]
+    restart: unless-stopped
+    env_file:
+      - path: ${IAGIS_ACCESS_ENV_FILE:-/etc/iagis/access-broker.env}
+        required: false
+    network_mode: host
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 volumes:
   iagis_data:
   iagis_reports:
