@@ -71,7 +71,8 @@ services:
     profiles: ["access"]
     restart: unless-stopped
     env_file:
-      - ${IAGIS_ACCESS_ENV_FILE:-/etc/iagis/access-broker.env}
+      - path: ${IAGIS_ACCESS_ENV_FILE:-/etc/iagis/access-broker.env}
+        required: false
     network_mode: host
     read_only: true
     tmpfs:
